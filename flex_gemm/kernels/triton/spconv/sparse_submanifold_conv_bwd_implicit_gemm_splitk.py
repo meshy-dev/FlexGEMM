@@ -136,11 +136,12 @@ def sparse_submanifold_conv_bwd_weight_implicit_gemm_splitk_kernel(
     
     # Iterate along V*Ci dimension.
     for k in range(k_start, k_end):
-         # Calculate pointers to input matrix.
-        input_offset_n = tl.load(neighbor_ptr, mask=offset_k[:, None] < N - k * BK, other=0xffffffff)   # (BK, BV)
+        mask = offset_k < N - k * BK
+        # Calculate pointers to input matrix.
+        input_offset_n = tl.load(neighbor_ptr, mask=mask[:, None], other=0xffffffff)   # (BK, BV)
         input_ptr = input + (input_offset_n[:, :, None] * Ci + offset_ci[None, None, :])                # (BK, BV, BCi)
         # Load the next block of input and weight.
-        grad_output_block = tl.load(grad_output_ptr, mask=offset_k[None, :] < N, other=0.0)
+        grad_output_block = tl.load(grad_output_ptr, mask=mask[None, :], other=0.0)
         input_block = tl.load(input_ptr, mask=input_offset_n[:, :, None] != 0xffffffff, other=0.0).reshape(BK, BV * BCi)
         # Accumulate along the K dimension.
         accumulator = tl.dot(grad_output_block, input_block, accumulator)           # (B1, BV * BCi)
@@ -279,6 +280,7 @@ def sparse_submanifold_conv_bwd_implicit_gemm_splitk(
     bias: torch.Tensor,
     neighbor: torch.Tensor,
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    assert grad_output.is_contiguous(), "Matrix grad_output must be contiguous"
     assert input.shape[1] == weight.shape[2], "Incompatible dimensions"
     assert input.is_contiguous(), "Matrix input must be contiguous"
     assert weight.is_contiguous(), "Matrix weight must be contiguous"

@@ -4,7 +4,7 @@ from flex_gemm.ops.spconv import sparse_submanifold_conv3d
 from tests.spconv_fwd import sphere_coords
 
 # Sparse voxel shell
-feats, coords, shape = sphere_coords(256, 256, dtype=torch.float16, device='cuda')
+feats, coords, shape = sphere_coords(64, 256, dtype=torch.float16, device='cuda')
 
 # Weight and bias
 Ci, Co = 256, 256

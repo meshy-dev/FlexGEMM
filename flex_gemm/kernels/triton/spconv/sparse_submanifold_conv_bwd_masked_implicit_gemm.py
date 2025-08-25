@@ -180,6 +180,7 @@ def sparse_submanifold_conv_bwd_masked_implicit_gemm(
     valid_signal_o: torch.Tensor,
     valid_signal_seg: torch.Tensor,
 ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    assert grad_output.is_contiguous(), "Matrix grad_output must be contiguous"
     assert input.shape[1] == weight.shape[2], "Incompatible dimensions"
     assert input.is_contiguous(), "Matrix input must be contiguous"
     assert weight.is_contiguous(), "Matrix weight must be contiguous"

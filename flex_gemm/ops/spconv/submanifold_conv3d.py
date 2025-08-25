@@ -221,6 +221,8 @@ class SubMConv3dFunction(Function):
                 
                 # addmm
                 grad_input = torch.mm(im2col, weight.view(Co, V, Ci).transpose(0, 1).reshape(V * Co, Ci))
+            else:
+                grad_input = None
                 
             if weight.requires_grad:
                 # im2col
@@ -231,13 +233,17 @@ class SubMConv3dFunction(Function):
                 
                 # addmm
                 grad_weight = torch.mm(im2col.t(), grad_output.view(N, -1)).view(V, Ci, Co).permute(2, 0, 1).contiguous().view(Co, Kd, Kh, Kw, Ci)
+            else:
+                grad_weight = None
             
             if bias is not None and bias.requires_grad:
                 grad_bias = grad_output.sum(dim=0)
+            else:
+                grad_bias = None
             
         elif spconv.ALGORITHM == Algorithm.IMPLICIT_GEMM:
             grad_input, grad_weight, grad_bias = kernels.triton.sparse_submanifold_conv_bwd_implicit_gemm(
-                grad_output,
+                grad_output.contiguous(),
                 feats,
                 weight.reshape(Co, Kd * Kh * Kw, Ci),
                 bias,
@@ -247,7 +253,7 @@ class SubMConv3dFunction(Function):
             
         elif spconv.ALGORITHM == Algorithm.IMPLICIT_GEMM_SPLITK:
             grad_input, grad_weight, grad_bias = kernels.triton.sparse_submanifold_conv_bwd_implicit_gemm_splitk(
-                grad_output,
+                grad_output.contiguous(),
                 feats,
                 weight.reshape(Co, Kd * Kh * Kw, Ci),
                 bias,
@@ -257,7 +263,7 @@ class SubMConv3dFunction(Function):
             
         elif spconv.ALGORITHM == Algorithm.MASKED_IMPLICIT_GEMM:
             grad_input, grad_weight, grad_bias = kernels.triton.sparse_submanifold_conv_bwd_masked_implicit_gemm(
-                grad_output,
+                grad_output.contiguous(),
                 feats,
                 weight.reshape(Co, Kd * Kh * Kw, Ci),
                 bias,
@@ -273,7 +279,7 @@ class SubMConv3dFunction(Function):
         
         elif spconv.ALGORITHM == Algorithm.MASKED_IMPLICIT_GEMM_SPLITK:
             grad_input, grad_weight, grad_bias = kernels.triton.sparse_submanifold_conv_bwd_masked_implicit_gemm_splitk(
-                grad_output,
+                grad_output.contiguous(),
                 feats,
                 weight.reshape(Co, Kd * Kh * Kw, Ci),
                 bias,
