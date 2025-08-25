@@ -93,9 +93,7 @@ Environment:
 ### Summary
 
 * **FlexGEMM consistently outperforms `spconv` and `torchsparse`** across both forward and backward sparse convolution benchmarks.
-Here’s a slightly refined version for clarity and flow:
 * **Significant speedups** are observed across both low- and high-resolution sparse tensors, achieving up to **\~2× acceleration** and an average **\~1.6× speedup** compared to `spconv` and `torchsparse`.
-
 * **Memory-efficient**: Achieves higher throughput without increasing GPU memory usage.
 * **Robust across channel and resolution scales**: Performs well for both wide (C=1024) and narrow (C=64) feature maps, as well as small (RES=8) and large (RES=1024) voxel grids.
 * **Ideal for large-scale 3D networks**: Particularly suitable for high-resolution voxelized point clouds, submanifold convolutions, and octree-based architectures.
