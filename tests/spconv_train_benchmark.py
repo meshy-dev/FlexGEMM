@@ -9,6 +9,8 @@ import torchsparse
 import torchsparse.nn
 import torchsparse.nn.functional
 import fvdb
+import warpconvnet.nn.modules.sparse_conv as warpconvnet_sparse_conv
+import warpconvnet.geometry.types.voxels as warpconvnet_voxels
 import flex_gemm
 from flex_gemm.ops.spconv import SubMConv3dFunction, sparse_submanifold_conv3d
 
@@ -149,6 +151,30 @@ def fvdb_kernel_fn(model, feats, coords, shape):
     h.backward(torch.ones_like(h))
 
 
+def warpconvnet_prepare_fn(feats: torch.Tensor, coords: torch.Tensor, shape: torch.Size, RES, C, L):
+    # Init module.
+    model = torch.nn.ModuleList([
+        warpconvnet_sparse_conv.SparseConv3d(C, C, 3, bias=True).cuda().to(feats.dtype)
+        for _ in range(L)
+    ])
+    
+    return {
+        'model': model,
+        'feats': feats,
+        'coords': coords[:, 1:].contiguous().int(),
+        'shape': shape,
+    }
+
+
+def warpconvnet_kernel_fn(model, feats, coords, shape):
+    zero_grad(model.parameters())
+    h = warpconvnet_voxels.Voxels([coords], [feats])
+    for layer in model:
+        h = layer(h)
+    h = h.feature_tensor
+    h.backward(torch.ones_like(h))
+
+
 def flex_gemm_prepare_fn(feats: torch.Tensor, coords: torch.Tensor, shape: torch.Size, RES, C, L):
     flex_gemm.ops.spconv.set_algorithm(flex_gemm.ops.spconv.Algorithm.MASKED_IMPLICIT_GEMM_SPLITK)
     flex_gemm.kernels.triton.spconv.config.allow_tf32 = allow_tf32
@@ -196,6 +222,7 @@ def test_conv_fwd():
     kernel_functions = {
         'fvdb': (fvdb_kernel_fn, fvdb_prepare_fn),
         'torchsparse': (torchsparse_kernel_fn, torchsparse_prepare_fn),
+        'warpconvnet': (warpconvnet_kernel_fn, warpconvnet_prepare_fn),
         'spconv': (spconv_kernel_fn, spconv_prepare_fn),
         'flex_gemm': (flex_gemm_kernel_fn, flex_gemm_prepare_fn),
     }
@@ -205,7 +232,7 @@ def test_conv_fwd():
         RES, C, L = c['RES'], c['C'], c['L']
 
         # Create random input matrices.
-        feats, coords, shape = sphere_coords(RES, C, dtype=torch.float16)
+        feats, coords, shape = sphere_coords(RES, C, dtype=torch.float32)
         args = {
             'feats': feats,
             'coords': coords,
@@ -248,7 +275,7 @@ def test_conv_fwd():
     configs = [f"{c['RES']},{c['C']},{c['L']}" for c in config]
     kernels = list(kernel_functions.keys())
     x = np.arange(len(configs))
-    width = 0.2
+    width = 0.16
 
     plt.figure(figsize=(12.5, 2.5))
 
@@ -271,7 +298,7 @@ def test_conv_fwd():
                 f'{time:.2f}',
                 ha='center',
                 va='bottom',
-                fontsize=8
+                fontsize=7
             )
 
     plt.xlabel("Configuration (RES, C, L)")

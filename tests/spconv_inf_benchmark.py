@@ -9,6 +9,8 @@ import torchsparse
 import torchsparse.nn
 import torchsparse.nn.functional
 import fvdb
+import warpconvnet.nn.modules.sparse_conv as warpconvnet_sparse_conv
+import warpconvnet.geometry.types.voxels as warpconvnet_voxels
 import flex_gemm
 from flex_gemm.ops.spconv import SubMConv3dFunction, sparse_submanifold_conv3d
 
@@ -147,6 +149,29 @@ def fvdb_kernel_fn(model, feats, coords, shape):
     for layer in model:
         h = layer(h)
     h = h.data.jdata
+    
+
+def warpconvnet_prepare_fn(feats: torch.Tensor, coords: torch.Tensor, shape: torch.Size, RES, C, L):
+    # Init module.
+    model = torch.nn.ModuleList([
+        warpconvnet_sparse_conv.SparseConv3d(C, C, 3, bias=True).cuda().to(feats.dtype)
+        for _ in range(L)
+    ])
+    
+    return {
+        'model': model,
+        'feats': feats,
+        'coords': coords[:, 1:].contiguous().int(),
+        'shape': shape,
+    }
+
+
+def warpconvnet_kernel_fn(model, feats, coords, shape):
+    zero_grad(model.parameters())
+    h = warpconvnet_voxels.Voxels([coords], [feats])
+    for layer in model:
+        h = layer(h)
+    h = h.feature_tensor
 
 
 def flex_gemm_prepare_fn(feats: torch.Tensor, coords: torch.Tensor, shape: torch.Size, RES, C, L):
@@ -195,6 +220,7 @@ def test_conv_fwd():
     kernel_functions = {
         'fvdb': (fvdb_kernel_fn, fvdb_prepare_fn),
         'torchsparse': (torchsparse_kernel_fn, torchsparse_prepare_fn),
+        'warpconvnet': (warpconvnet_kernel_fn, warpconvnet_prepare_fn),
         'spconv': (spconv_kernel_fn, spconv_prepare_fn),
         'flex_gemm': (flex_gemm_kernel_fn, flex_gemm_prepare_fn),
     }
@@ -247,7 +273,7 @@ def test_conv_fwd():
     configs = [f"{c['RES']},{c['C']},{c['L']}" for c in config]
     kernels = list(kernel_functions.keys())
     x = np.arange(len(configs))
-    width = 0.2
+    width = 0.16
 
     plt.figure(figsize=(12.5, 2.5))
 
