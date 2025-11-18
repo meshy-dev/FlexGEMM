@@ -451,7 +451,7 @@ __global__ void hashmap_insert_3d_idx_as_val_cuda_kernel(
 
 __global__ void hashmap_insert_3d_idx_as_val_cuda_kernel_64(
     const uint64_t N,
-    const uint64_t M,
+    const uint32_t M,
     const int W,
     const int H,
     const int D,

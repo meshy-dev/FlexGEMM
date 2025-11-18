@@ -25,6 +25,7 @@ def sparse_submanifold_conv_fwd_implicit_gemm_kernel(
     B2: tl.constexpr,   # Block size for Co dimension
     BK: tl.constexpr,   # Block size for K dimension (V * Ci)
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
+    is_uint64: tl.constexpr,  # Whether neighbor is uint64 (True) or uint32 (False)
 ):
     """
     Sparse submanifold convolution forward kernel using implicit GEMM.
@@ -61,7 +62,12 @@ def sparse_submanifold_conv_fwd_implicit_gemm_kernel(
         neighbor_offset_n = tl.load(neighbor + offset_n * V + v)                                # (B1,)
         input_ptr = input + bk * BK + (neighbor_offset_n[:, None].to(tl.int64) * Ci + offset_k[None, :])     # (B1, BK)
         # Load the next block of input and weight.
-        neigh_mask = neighbor_offset_n != 0xffffffff
+        # Use different invalid value markers for uint32 vs uint64
+        if is_uint64:
+            invalid_neighbor = 0xffffffffffffffff
+        else:
+            invalid_neighbor = 0xffffffff
+        neigh_mask = neighbor_offset_n != invalid_neighbor
         k_mask = offset_k < Ci - bk * BK
         input_block = tl.load(input_ptr, mask=neigh_mask[:, None] & k_mask[None, :], other=0.0)
         weight_block = tl.load(weight_ptr, mask=k_mask[:, None], other=0.0)
@@ -95,8 +101,11 @@ def sparse_submanifold_conv_fwd_implicit_gemm(
     assert input.is_contiguous(), "Matrix input must be contiguous"
     assert weight.is_contiguous(), "Matrix weight must be contiguous"
     assert neighbor.is_contiguous(), "Matrix neighbor must be contiguous"
+    assert neighbor.dtype in [torch.uint32, torch.uint64], f"Unsupported neighbor dtype: {neighbor.dtype}. Expected uint32 or uint64"
     N, Ci, Co, V = neighbor.shape[0], input.shape[1], weight.shape[0], weight.shape[1]
     LOGN = int(math.log2(N))
+    # Determine if neighbor is uint64
+    is_uint64 = neighbor.dtype == torch.uint64
     # Allocate output matrix output.
     output = torch.empty((N, Co), device=input.device, dtype=input.dtype)
     # Launch the kernel.
@@ -105,5 +114,6 @@ def sparse_submanifold_conv_fwd_implicit_gemm(
         input, weight, bias, neighbor, output,
         N, LOGN, Ci, Co, V,
         allow_tf32=config.allow_tf32,
+        is_uint64=is_uint64,
     )
     return output

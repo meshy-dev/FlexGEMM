@@ -75,6 +75,74 @@ __global__ void hashmap_lookup_submanifold_conv_neighbour_map_cuda_kernel(
     }
 }
 
+/**
+ * Lookup sparse submanifold convolution neighbor map with hashmap
+ * 
+ * @param N         number of elements in the hashmap
+ * @param M         number of 3d coordinates
+ * @param W         the number of width dimensions
+ * @param H         the number of height dimensions
+ * @param D         the number of depth dimensions
+ * @param V         the volume of the kernel
+ * @param Kw        the number of width kernel dimensions
+ * @param Kh        the number of height kernel dimensions
+ * @param Kd        the number of depth kernel dimensions
+ * @param Dw        the dialation of width
+ * @param Dh        the dialation of height
+ * @param Dd        the dialation of depth
+ * @param hashmap   [2N] uint32 tensor containing the hashmap (key-value pairs)
+ * @param coords    [M, 4] int32 tensor containing the keys to be looked up
+ * @param neighbor [M, Kw * Kh * Kd] uint32 tensor containing the submanifold convolution nerbor map
+ */
+__global__ void hashmap_lookup_submanifold_conv_neighbour_map_cuda_kernel_64(
+    const uint64_t N,
+    const uint32_t M,
+    const int W,
+    const int H,
+    const int D,
+    const int V,
+    const int Kw,
+    const int Kh,
+    const int Kd,
+    const int Dw,
+    const int Dh,
+    const int Dd,
+    const uint64_t* __restrict__  hashmap,
+    const int32_t* __restrict__  coords,
+    uint64_t* __restrict__ neighbor
+) {
+    int64_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    int half_V = V / 2 + 1;
+    uint64_t idx = thread_id / half_V;
+    if (idx < M) {
+        // coords is [M, 4] int64 tensor, access as flat array
+        int64_t b = coords[idx * 4 + 0];
+        int64_t x = coords[idx * 4 + 1] - Kw / 2 * Dw;
+        int64_t y = coords[idx * 4 + 2] - Kh / 2 * Dh;
+        int64_t z = coords[idx * 4 + 3] - Kd / 2 * Dd;
+        int KhKd = Kh * Kd;
+        int v = thread_id % half_V;
+        
+        uint64_t value = K_EMPTY_64;
+        if (v == half_V - 1) {
+            value = idx;
+        }
+        else {
+            int64_t kx = x + v / KhKd * Dw;
+            int64_t ky = y + v / Kd % Kh * Dh;
+            int64_t kz = z + v % Kd * Dd;
+            if (kx >= 0 && kx < W && ky >= 0 && ky < H && kz >= 0 && kz < D) {
+                uint64_t key = static_cast<uint64_t>((((b * W + kx) * H + ky) * D + kz));
+                value = linear_probing_lookup_64(hashmap, key, N);
+                if (value != K_EMPTY_64) {
+                    neighbor[value * V + V - 1 - v] = idx;
+                }
+            }
+        }
+        neighbor[idx * V + v] = value;
+    }
+}
+
 
 /**
  * Build sparse submanifold convolution neighbor map with hashmap
@@ -108,40 +176,80 @@ torch::Tensor hashmap_build_submanifold_conv_neighbour_map_cuda(
 ) {
     // Allocate output tensor
     int V = Kw * Kh * Kd;
-    auto neighbor = torch::full({coords.size(0), V}, K_EMPTY, torch::dtype(torch::kUInt32).device(hashmap.device()));
 
-    // Insert 3D coordinates into the hashmap
-    hashmap_insert_3d_idx_as_val_cuda(
-        hashmap,
-        coords,
-        W,
-        H,
-        D
-    );
+    if (hashmap.dtype() == torch::kUInt32) {
+        auto neighbor = torch::full({coords.size(0), V}, K_EMPTY, torch::dtype(torch::kUInt32).device(hashmap.device()));
 
-    // Lookup sparse submanifold convolution neighbor map with hashmap
-    hashmap_lookup_submanifold_conv_neighbour_map_cuda_kernel<<<
-        (coords.size(0) * (V / 2 + 1) + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        BLOCK_SIZE
-    >>>(
-        hashmap.size(0) / 2,
-        coords.size(0),
-        W,
-        H,
-        D,
-        V,
-        Kw,
-        Kh,
-        Kd,
-        Dw,
-        Dh,
-        Dd,
-        hashmap.data_ptr<uint32_t>(),
-        coords.data_ptr<int32_t>(),
-        neighbor.data_ptr<uint32_t>()
-    );
+        // Insert 3D coordinates into the hashmap
+        hashmap_insert_3d_idx_as_val_cuda(
+            hashmap,
+            coords,
+            W,
+            H,
+            D
+        );
 
-    return neighbor;
+        // Lookup sparse submanifold convolution neighbor map with hashmap
+        hashmap_lookup_submanifold_conv_neighbour_map_cuda_kernel<<<
+            (coords.size(0) * (V / 2 + 1) + BLOCK_SIZE - 1) / BLOCK_SIZE,
+            BLOCK_SIZE
+        >>>(
+            hashmap.size(0) / 2,
+            coords.size(0),
+            W,
+            H,
+            D,
+            V,
+            Kw,
+            Kh,
+            Kd,
+            Dw,
+            Dh,
+            Dd,
+            hashmap.data_ptr<uint32_t>(),
+            coords.data_ptr<int32_t>(),
+            neighbor.data_ptr<uint32_t>()
+        );
+        return neighbor;
+    }
+    else if (hashmap.dtype() == torch::kUInt64) {
+        auto neighbor = torch::full({coords.size(0), V}, static_cast<uint64_t>(K_EMPTY_64), torch::dtype(torch::kUInt64).device(hashmap.device()));
+
+        // Insert 3D coordinates into the hashmap
+        hashmap_insert_3d_idx_as_val_cuda(
+            hashmap,
+            coords,
+            W,
+            H,
+            D
+        );
+
+        // Lookup sparse submanifold convolution neighbor map with hashmap
+        hashmap_lookup_submanifold_conv_neighbour_map_cuda_kernel_64<<<
+            (coords.size(0) * (V / 2 + 1) + BLOCK_SIZE - 1) / BLOCK_SIZE,
+            BLOCK_SIZE
+        >>>(
+            hashmap.size(0) / 2,
+            coords.size(0),
+            W,
+            H,
+            D,
+            V,
+            Kw,
+            Kh,
+            Kd,
+            Dw,
+            Dh,
+            Dd,
+            hashmap.data_ptr<uint64_t>(),
+            coords.data_ptr<int32_t>(),
+            neighbor.data_ptr<uint64_t>()
+        );
+        return neighbor;
+    }
+
+    TORCH_CHECK(false, "Unsupported hashmap dtype. Expect uint32 or uint64.");
+    return torch::Tensor();
 }
 
 

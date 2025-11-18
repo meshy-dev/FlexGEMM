@@ -42,10 +42,15 @@ class SubMConv3dFunction(Function):
         dilation: Tuple[int, int, int]
     ) -> SubMConv3dNeighborCache:
         assert coords.is_contiguous(), "Coords should be contiguous"
-        hashmap = torch.full((2 * int(spconv.HASHMAP_RATIO * coords.shape[0]),), 0xffffffff, dtype=torch.uint32, device=coords.device)
+        assert coords.dtype in [torch.int32], "Unsupported coords dtype. Expect int32"
         N, C, W, H, D = shape
-        assert N * W * H * D <= 2**32, "Currently, the max number of elements in a tensor is 2^32"
-        
+        if N * W * H * D <= 2**32:
+            hashmap = torch.full((2 * int(spconv.HASHMAP_RATIO * coords.shape[0]),), 0xffffffff, dtype=torch.uint32, device=coords.device)
+        elif N * W * H * D <= 2**64:
+            hashmap = torch.full((2 * int(spconv.HASHMAP_RATIO * coords.shape[0]),), 0xffffffffffffffff, dtype=torch.uint64, device=coords.device)
+        else:
+            assert False, f"Unsupported range of elements in coords, maximum is 2^64 but got {N} * {W} * {H} * {D} = {N * W * H * D}"
+
         if spconv.ALGORITHM in [Algorithm.EXPLICIT_GEMM, Algorithm.IMPLICIT_GEMM, Algorithm.IMPLICIT_GEMM_SPLITK]:
             if coords.is_cuda:
                 neighbor_map = kernels.cuda.hashmap_build_submanifold_conv_neighbour_map_cuda(
