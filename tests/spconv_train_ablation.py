@@ -178,8 +178,12 @@ def test_conv_fwd():
         # Benchmark each custom kernel.
         for kernel_fn, prepare_fn in kernel_functions.values():
             avg_time, memory, C_kernel = benchmark_kernel(kernel_fn, **args, prepare_fn=prepare_fn)
-            results[config_key]['time'].append(f'{avg_time:.2f} ms')
-            results[config_key]['memory'].append(f'{memory:.1f}G')
+            if memory != 'OOM':
+                results[config_key]['time'].append(f'{avg_time:.2f} ms')
+                results[config_key]['memory'].append(f'{memory:.1f}G')
+            else:
+                results[config_key]['time'].append('N/A')
+                results[config_key]['memory'].append('OOM')
                 
     # Print results as a formatted table.
     print("=" * 180)

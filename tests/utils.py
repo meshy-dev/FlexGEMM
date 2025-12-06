@@ -32,25 +32,32 @@ def calc_err(src, ref):
 
 
 def benchmark_kernel(kernel_fn, *args, prepare_fn=None, num_warmup=2, num_iters=20, **kwargs):
-    if prepare_fn is not None:
-        kwargs = prepare_fn(*args, **kwargs)
-        args = tuple()
-    # Warmup iterations.
-    for _ in range(num_warmup):
-        C = kernel_fn(*args, **kwargs)
-    torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize()
-    # Timing iterations.
-    start = time.time()
-    for _ in range(num_iters):
-        C = kernel_fn(*args, **kwargs)
-    torch.cuda.synchronize()
-    elapsed = time.time() - start
-    memory = torch.cuda.max_memory_allocated() / 1024**3
-    avg_time_ms = (elapsed / num_iters) * 1000.0
-    avg_mem_gb = memory
-    if isinstance(C, tuple):
-        C = torch.cat([c.detach().flatten() for c in C if c is not None], dim=0)
+    try:
+        if prepare_fn is not None:
+            kwargs = prepare_fn(*args, **kwargs)
+            args = tuple()
+        # Warmup iterations.
+        for _ in range(num_warmup):
+            C = kernel_fn(*args, **kwargs)
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+        # Timing iterations.
+        start = time.time()
+        for _ in range(num_iters):
+            C = kernel_fn(*args, **kwargs)
+        torch.cuda.synchronize()
+        elapsed = time.time() - start
+        memory = torch.cuda.max_memory_allocated() / 1024**3
+        avg_time_ms = (elapsed / num_iters) * 1000.0
+        avg_mem_gb = memory
+        if isinstance(C, tuple):
+            C = torch.cat([c.detach().flatten() for c in C if c is not None], dim=0)
+    except Exception as e:
+        if isinstance(e, RuntimeError) and 'out of memory' in str(e):
+            print('WARNING: OOM error occurred during benchmarking. Skipping this run.')
+            return None, 'OOM', None
+        else:
+            raise e
     return avg_time_ms, avg_mem_gb, C
 
 
