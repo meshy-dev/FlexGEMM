@@ -25,6 +25,8 @@ It implements **Explicit**, **Implicit**, and **Masked Implicit** algorithm vari
 * **PyTorch** ≥ 2.4.0
 * **Triton** ≥ 3.2.0
 
+> **[WIP]** BF16 precision support is under development on this branch.
+
 ### Install via pip
 ```bash
 git clone https://github.com/JeffreyXiang/FlexGEMM.git
