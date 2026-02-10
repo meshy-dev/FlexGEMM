@@ -10,6 +10,7 @@ from . import config
 heuristics = {
     'valid_kernel': lambda args: args['valid_kernel'](args['B1']),
     'valid_kernel_seg': lambda args: args['valid_kernel_seg'](args['B1']),
+    'NUM_K': lambda args: triton.cdiv(args['Ci'], args['BK']),
 }
 
 
@@ -33,9 +34,10 @@ def sparse_submanifold_conv_fwd_masked_implicit_gemm_kernel(
     B2: tl.constexpr,   # Block size for Co dimension
     BK: tl.constexpr,   # Block size for K dimension (V * Ci)
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
-    # Huristic parameters
+    # Heuristic parameters
     valid_kernel,
     valid_kernel_seg,
+    NUM_K: tl.constexpr,  # = cdiv(Ci, BK), constexpr for optimized divmod codegen
 ):
     """
     Sparse submanifold convolution forward kernel using masked implicit GEMM.
@@ -56,7 +58,6 @@ def sparse_submanifold_conv_fwd_masked_implicit_gemm_kernel(
     block_id_n = block_id // block_dim_co
     
     # Create pointers for submatrices of A and B.
-    num_k = tl.cdiv(Ci, BK)  # Number of blocks in K dimension
     valid_kernel_start = tl.load(valid_kernel_seg + block_id_n)
     valid_kernel_seglen = tl.load(valid_kernel_seg + block_id_n + 1) - valid_kernel_start
     offset_n = block_id_n * B1 + tl.arange(0, B1)
@@ -69,9 +70,9 @@ def sparse_submanifold_conv_fwd_masked_implicit_gemm_kernel(
     accumulator = tl.zeros((B1, B2), dtype=tl.float32)
 
     # Iterate along V*Ci dimension.
-    for k in range(num_k * valid_kernel_seglen):
-        v = k // num_k
-        bk = k % num_k
+    for k in range(NUM_K * valid_kernel_seglen):
+        v = k // NUM_K
+        bk = k % NUM_K
         v = tl.load(valid_kernel + valid_kernel_start + v)
         # Calculate pointers to input matrix.
         neighbor_offset_n = tl.load(neighbor + offset_sorted_n * V + v)                             # (B1,)

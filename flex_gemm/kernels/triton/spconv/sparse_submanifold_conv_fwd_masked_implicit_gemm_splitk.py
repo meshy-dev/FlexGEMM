@@ -12,6 +12,7 @@ from .sparse_submanifold_conv_fwd_masked_implicit_gemm import sparse_submanifold
 heuristics = {
     'valid_kernel': lambda args: args['valid_kernel'](args['B1']),
     'valid_kernel_seg': lambda args: args['valid_kernel_seg'](args['B1']),
+    'NUM_K': lambda args: triton.cdiv(args['Ci'], args['BK']),
 }
 
 
@@ -36,9 +37,10 @@ def sparse_submanifold_conv_fwd_masked_implicit_gemm_splitk_kernel(
     BK: tl.constexpr,   # Block size for K dimension (V * Ci)
     SPLITK: tl.constexpr,  # Split K dimension into multiple sub-dimensions
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
-    # Huristic parameters
+    # Heuristic parameters
     valid_kernel,
     valid_kernel_seg,
+    NUM_K: tl.constexpr,  # = cdiv(Ci, BK), constexpr for optimized divmod codegen
 ):
     """
     Sparse submanifold convolution forward kernel using masked implicit GEMM split-k.
@@ -60,11 +62,10 @@ def sparse_submanifold_conv_fwd_masked_implicit_gemm_splitk_kernel(
     block_id_n = block_id // block_dim_co
     
     # Create pointers for submatrices of A and B.
-    num_k = tl.cdiv(Ci, BK)  # Number of blocks in K dimension
     valid_kernel_start = tl.load(valid_kernel_seg + block_id_n)
     valid_kernel_seglen = tl.load(valid_kernel_seg + block_id_n + 1) - valid_kernel_start
-    k_start = tl.cdiv(num_k * valid_kernel_seglen * block_id_k, SPLITK)
-    k_end = tl.cdiv(num_k * valid_kernel_seglen * (block_id_k + 1), SPLITK)
+    k_start = tl.cdiv(NUM_K * valid_kernel_seglen * block_id_k, SPLITK)
+    k_end = tl.cdiv(NUM_K * valid_kernel_seglen * (block_id_k + 1), SPLITK)
     offset_n = block_id_n * B1 + tl.arange(0, B1)
     n_mask = offset_n < N
     offset_sorted_n = tl.load(sorted_idx + offset_n, mask=n_mask, other=0)  # (B1,)
@@ -76,8 +77,8 @@ def sparse_submanifold_conv_fwd_masked_implicit_gemm_splitk_kernel(
     
     # Iterate along V*Ci dimension.
     for k in range(k_start, k_end):
-        v = k // num_k
-        bk = k % num_k
+        v = k // NUM_K
+        bk = k % NUM_K
         v = tl.load(valid_kernel + valid_kernel_start + v)
         # Calculate pointers to input matrix.
         neighbor_offset_n = tl.load(neighbor + offset_sorted_n * V + v)                             # (B1,)

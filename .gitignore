@@ -401,3 +401,7 @@ FodyWeavers.xsd
 .vscode/
 build/
 flex_gemm.egg-info/
+
+# Meshy custom kernel variants
+flex_gemm/kernels/triton/spconv/sparse_submanifold_conv_fwd_masked_implicit_gemm_original.py
+flex_gemm/kernels/triton/spconv/sparse_submanifold_conv_fwd_masked_implicit_gemm_splitk_original.py
