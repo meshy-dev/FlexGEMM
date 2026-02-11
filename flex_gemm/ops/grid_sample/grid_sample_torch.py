@@ -1,7 +1,6 @@
 from typing import *
 import torch
 from .. import grid_sample, utils
-from ... import kernels
 
 
 class GridSample3dTorch:
@@ -35,7 +34,7 @@ class GridSample3dTorch:
         C, W, H, D = shape[-4:]
         
         hashmap_keys, hashmap_vals = utils.init_hashmap(shape, int(grid_sample.HASHMAP_RATIO * coords.shape[0]), coords.device)
-        kernels.cuda.hashmap_insert_3d_idx_as_val_cuda(
+        torch.ops.flex_gemm.hashmap_insert_3d_idx_as_val_cuda(
             hashmap_keys, hashmap_vals,
             coords.int(),
             W, H, D
@@ -46,7 +45,7 @@ class GridSample3dTorch:
             query_pts.int()
         ], dim=2)                       # [B, L, 4]
                 
-        idx = kernels.cuda.hashmap_lookup_3d_cuda(
+        idx = torch.ops.flex_gemm.hashmap_lookup_3d_cuda(
             hashmap_keys, hashmap_vals,
             neigh_pts.view(-1, 4),
             W, H, D
@@ -85,7 +84,7 @@ class GridSample3dTorch:
         C, W, H, D = shape[-4:]
         
         hashmap_keys, hashmap_vals = utils.init_hashmap(shape, int(grid_sample.HASHMAP_RATIO * coords.shape[0]), coords.device)
-        kernels.cuda.hashmap_insert_3d_idx_as_val_cuda(
+        torch.ops.flex_gemm.hashmap_insert_3d_idx_as_val_cuda(
             hashmap_keys, hashmap_vals,
             coords.int(),
             W, H, D
@@ -105,7 +104,7 @@ class GridSample3dTorch:
             ], device=query_pts.device).unsqueeze(0)).reshape(B, 8 * L, 3).int()
         ], dim=2)                                   # [B, 8*L, 4]
         
-        idx = kernels.cuda.hashmap_lookup_3d_cuda(
+        idx = torch.ops.flex_gemm.hashmap_lookup_3d_cuda(
             hashmap_keys, hashmap_vals,
             neigh_pts.view(-1, 4),
             W, H, D

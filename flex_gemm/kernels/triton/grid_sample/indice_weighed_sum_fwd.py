@@ -63,11 +63,12 @@ def indice_weighed_sum_fwd_kernel(
     tl.store(out_ptr, c, mask=out_mask)
 
 
-def indice_weighed_sum_fwd(
+def _indice_weighed_sum_fwd_impl(
     input: torch.Tensor,
     indices: torch.Tensor,
     weight: torch.Tensor,
 ) -> torch.Tensor:
+    """Raw implementation — launches the Triton kernel directly."""
     assert input.is_contiguous(), "Matrix input must be contiguous"
     assert indices.is_contiguous(), "Matrix indices must be contiguous"
     assert weight.is_contiguous(), "Matrix weight must be contiguous"
@@ -83,3 +84,23 @@ def indice_weighed_sum_fwd(
         LOGN, M, C, V,
     )
     return output
+
+
+@torch.library.custom_op("flex_gemm::indice_weighed_sum_fwd", mutates_args=())
+def indice_weighed_sum_fwd(
+    input: torch.Tensor,
+    indices: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return _indice_weighed_sum_fwd_impl(input, indices, weight)
+
+
+@indice_weighed_sum_fwd.register_fake
+def _(
+    input: torch.Tensor,
+    indices: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    M = indices.shape[0]
+    C = input.shape[1]
+    return input.new_empty(M, C)

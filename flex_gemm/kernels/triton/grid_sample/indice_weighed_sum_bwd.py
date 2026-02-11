@@ -61,12 +61,13 @@ def indice_weighed_sum_bwd_input_kernel(
     tl.atomic_add(gi_ptr, contrib, mask=valid_mask[:, None] & (offset_k[None, :] < C), sem="relaxed")
 
 
-def indice_weighed_sum_bwd_input(
+def _indice_weighed_sum_bwd_input_impl(
     grad_output: torch.Tensor,
     indices: torch.Tensor,
     weight: torch.Tensor,
     N: int,
 ) -> torch.Tensor:
+    """Raw implementation — launches the Triton kernel directly."""
     assert grad_output.is_contiguous(), "Matrix grad_output must be contiguous"
     assert indices.is_contiguous(), "Matrix indices must be contiguous"
     assert weight.is_contiguous(), "Matrix weight must be contiguous"
@@ -82,3 +83,24 @@ def indice_weighed_sum_bwd_input(
         LOGN, M, C, V,
     )
     return grad_input
+
+
+@torch.library.custom_op("flex_gemm::indice_weighed_sum_bwd_input", mutates_args=())
+def indice_weighed_sum_bwd_input(
+    grad_output: torch.Tensor,
+    indices: torch.Tensor,
+    weight: torch.Tensor,
+    N: int,
+) -> torch.Tensor:
+    return _indice_weighed_sum_bwd_input_impl(grad_output, indices, weight, N)
+
+
+@indice_weighed_sum_bwd_input.register_fake
+def _(
+    grad_output: torch.Tensor,
+    indices: torch.Tensor,
+    weight: torch.Tensor,
+    N: int,
+) -> torch.Tensor:
+    C = grad_output.shape[-1]
+    return grad_output.new_empty(N, C)

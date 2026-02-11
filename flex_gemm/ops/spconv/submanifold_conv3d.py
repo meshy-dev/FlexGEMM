@@ -18,7 +18,7 @@ class SubMConv3dNeighborCache:
         setattr(self, key, value)
         
     def compute_kernel_idx(self, block_size: int):
-        valid_kernel, valid_kernel_seg = kernels.cuda.neighbor_map_post_process_for_masked_implicit_gemm_2(self['gray_code'], self['sorted_idx'], block_size)
+        valid_kernel, valid_kernel_seg = torch.ops.flex_gemm.neighbor_map_post_process_for_masked_implicit_gemm_2(self['gray_code'], self['sorted_idx'], block_size)
         self[f'valid_kernel_{block_size}'] = valid_kernel
         self[f'valid_kernel_seg_{block_size}'] = valid_kernel_seg
         
@@ -49,7 +49,7 @@ class SubMConv3dFunction(Function):
 
         if spconv.ALGORITHM in [Algorithm.EXPLICIT_GEMM, Algorithm.IMPLICIT_GEMM, Algorithm.IMPLICIT_GEMM_SPLITK]:
             if coords.is_cuda:
-                neighbor_map = kernels.cuda.hashmap_build_submanifold_conv_neighbour_map_cuda(
+                neighbor_map = torch.ops.flex_gemm.hashmap_build_submanifold_conv_neighbour_map_cuda(
                     hashmap_keys, hashmap_vals, coords,
                     W, H, D,
                     kernel_size[0], kernel_size[1], kernel_size[2],
@@ -63,7 +63,7 @@ class SubMConv3dFunction(Function):
         
         elif spconv.ALGORITHM in [Algorithm.MASKED_IMPLICIT_GEMM, Algorithm.MASKED_IMPLICIT_GEMM_SPLITK]:
             if coords.is_cuda:
-                neighbor_map = kernels.cuda.hashmap_build_submanifold_conv_neighbour_map_cuda(
+                neighbor_map = torch.ops.flex_gemm.hashmap_build_submanifold_conv_neighbour_map_cuda(
                     hashmap_keys, hashmap_vals, coords,
                     W, H, D,
                     kernel_size[0], kernel_size[1], kernel_size[2],
@@ -75,7 +75,7 @@ class SubMConv3dFunction(Function):
             assert V <= 32, "Currently, the max kernel volume is 32 because kernel mask is encoded as uint32"
             
             gray_code, sorted_idx, valid_signal_i, valid_signal_o, valid_signal_seg = \
-                kernels.cuda.neighbor_map_post_process_for_masked_implicit_gemm_1(neighbor_map)
+                torch.ops.flex_gemm.neighbor_map_post_process_for_masked_implicit_gemm_1(neighbor_map)
             
             return SubMConv3dNeighborCache(**{
                 'neighbor_map': neighbor_map,
