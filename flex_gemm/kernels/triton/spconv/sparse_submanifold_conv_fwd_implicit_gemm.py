@@ -7,10 +7,16 @@ from ....utils.autotuner import triton_autotune
 from . import config
 
 
+heuristics_fwd = {
+    'NUM_K': lambda args: triton.cdiv(args['Ci'], args['BK']),
+}
+
+
 @triton_autotune(
     configs=config.autotune_config,
     key=['LOGN', 'Ci', 'Co', 'V', 'allow_tf32'],
 )
+@triton.heuristics(heuristics_fwd)
 @triton.jit
 def sparse_submanifold_conv_fwd_implicit_gemm_kernel(
     input,
@@ -25,6 +31,8 @@ def sparse_submanifold_conv_fwd_implicit_gemm_kernel(
     B2: tl.constexpr,   # Block size for Co dimension
     BK: tl.constexpr,   # Block size for K dimension (V * Ci)
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
+    # Heuristic parameters
+    NUM_K: tl.constexpr,  # = cdiv(Ci, BK), constexpr for optimized divmod codegen
 ):
     """
     Sparse submanifold convolution forward kernel using implicit GEMM.
@@ -42,7 +50,6 @@ def sparse_submanifold_conv_fwd_implicit_gemm_kernel(
     block_id_n = block_id // block_dim_co
     
     # Create pointers for submatrices of A and B.
-    num_k = tl.cdiv(Ci, BK)  # Number of blocks in K dimension
     offset_n = (block_id_n * B1 + tl.arange(0, B1)) % N         # (B1,)
     offset_co = (block_id_co * B2 + tl.arange(0, B2)) % Co      # (B2,)
     offset_k = tl.arange(0, BK)                                 # (BK,)
@@ -54,9 +61,9 @@ def sparse_submanifold_conv_fwd_implicit_gemm_kernel(
     weight_ptr = weight + (offset_co[None, :] * V * Ci + offset_k[:, None])     # (BK, B2)
     
     # Iterate along V*Ci dimension.
-    for k in range(num_k * V):
-        v = k // num_k
-        bk = k % num_k
+    for k in range(NUM_K * V):
+        v = k // NUM_K
+        bk = k % NUM_K
         # Calculate pointers to input matrix.
         neighbor_offset_n = tl.load(neighbor + offset_n * V + v)                                # (B1,)
         input_ptr = input + bk * BK + (neighbor_offset_n[:, None].to(tl.int64) * Ci + offset_k[None, :])     # (B1, BK)

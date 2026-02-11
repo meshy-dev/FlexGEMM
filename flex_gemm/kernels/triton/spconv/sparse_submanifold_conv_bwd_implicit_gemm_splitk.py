@@ -12,10 +12,16 @@ from .sparse_submanifold_conv_bwd_implicit_gemm import (
 )
 
 
+heuristics_bwd_input = {
+    'NUM_K': lambda args: triton.cdiv(args['Co'], args['BK']),
+}
+
+
 @triton_autotune(
     configs=config.autotune_config,
     key=['LOGN', 'Ci', 'Co', 'V', 'SPLITK', 'allow_tf32'],
 )
+@triton.heuristics(heuristics_bwd_input)
 @triton.jit
 def sparse_submanifold_conv_bwd_input_implicit_gemm_splitk_kernel(
     grad_output,
@@ -30,6 +36,8 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_splitk_kernel(
     BK: tl.constexpr,   # Block size for K dimension (V * Co)
     SPLITK: tl.constexpr,  # Split K dimension
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
+    # Heuristic parameters
+    NUM_K: tl.constexpr,  # = cdiv(Co, BK), constexpr for optimized divmod codegen
 ):
     """
     Sparse submanifold convolution backward to input kernel using implicit GEMM.
@@ -47,9 +55,8 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_splitk_kernel(
     block_id_n = block_id // block_dim_ci
     
     # Create pointers for submatrices of A and B.
-    num_k = tl.cdiv(Co, BK)  # Number of blocks in K dimension
-    k_start = tl.cdiv(num_k * V * block_id_k, SPLITK)
-    k_end = tl.cdiv(num_k * V * (block_id_k + 1), SPLITK)
+    k_start = tl.cdiv(NUM_K * V * block_id_k, SPLITK)
+    k_end = tl.cdiv(NUM_K * V * (block_id_k + 1), SPLITK)
     offset_n = (block_id_n * B1 + tl.arange(0, B1)) % N         # (B1,)
     offset_ci = (block_id_ci * B2 + tl.arange(0, B2)) % Ci      # (B2,)
     offset_k = tl.arange(0, BK)                                 # (BK,)
@@ -59,8 +66,8 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_splitk_kernel(
     
     # Iterate along V*Co dimension.
     for k in range(k_start, k_end):
-        v = k // num_k
-        bk = k % num_k
+        v = k // NUM_K
+        bk = k % NUM_K
         # Calculate pointers to grad_output matrix.
         neighbor_offset_n = tl.load(neighbor + offset_n * V + V - 1 - v)                                    # (B1,)
         grad_output_ptr = grad_output + bk * BK + (neighbor_offset_n[:, None].to(tl.int64) * Co + offset_k[None, :])     # (B1, BK)
@@ -83,9 +90,10 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_splitk_kernel(
     tl.store(grad_input_ptr, accumulator, mask=grad_input_mask)
 
 
-heuristics = {
+heuristics_bwd_weight = {
     'BV': lambda meta: max(1, meta['B2'] // meta['Ci']),
     'BCi': lambda meta: min(meta['Ci'], meta['B2']),
+    'NUM_K': lambda meta: triton.cdiv(meta['N'], meta['BK']),
 }
 
     
@@ -93,7 +101,7 @@ heuristics = {
     configs=config.autotune_config,
     key=['LOGN', 'Ci', 'Co', 'V', 'SPLITK', 'allow_tf32'],
 )
-@triton.heuristics(heuristics)
+@triton.heuristics(heuristics_bwd_weight)
 @triton.jit
 def sparse_submanifold_conv_bwd_weight_implicit_gemm_splitk_kernel(
     grad_output,
@@ -110,6 +118,8 @@ def sparse_submanifold_conv_bwd_weight_implicit_gemm_splitk_kernel(
     BCi: tl.constexpr,  # Block size for Ci dimension
     SPLITK: tl.constexpr,  # Split K dimension
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
+    # Heuristic parameters
+    NUM_K: tl.constexpr,  # = cdiv(N, BK), constexpr for optimized loop bound
 ):
     """
     Sparse submanifold convolution backward to weight kernel using implicit GEMM.
@@ -125,9 +135,8 @@ def sparse_submanifold_conv_bwd_weight_implicit_gemm_splitk_kernel(
     block_id_k = tl.program_id(axis=2)
     
     # Create pointers for submatrices of A and B.
-    num_k = tl.cdiv(N, BK)  # Number of blocks in K dimension
-    k_start = tl.cdiv(num_k * block_id_k, SPLITK)
-    k_end = tl.cdiv(num_k * (block_id_k + 1), SPLITK)
+    k_start = tl.cdiv(NUM_K * block_id_k, SPLITK)
+    k_end = tl.cdiv(NUM_K * (block_id_k + 1), SPLITK)
     offset_co = (block_id_co * B1 + tl.arange(0, B1)) % Co                          # (B1,)
     offset_v = (tl.arange(0, BV) + (block_id_vci // (Ci // BCi)) * BV) % V          # (BV,)
     offset_ci = (tl.arange(0, BCi) + (block_id_vci % (Ci // BCi)) * BCi) % Ci       # (BCi,)
