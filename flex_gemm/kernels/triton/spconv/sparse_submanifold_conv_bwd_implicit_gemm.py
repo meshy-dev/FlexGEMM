@@ -7,10 +7,16 @@ from ....utils.autotuner import triton_autotune
 from . import config
 
 
+heuristics_bwd_input = {
+    'NUM_K': lambda args: triton.cdiv(args['Co'], args['BK']),
+}
+
+
 @triton_autotune(
     configs=config.autotune_config,
     key=['LOGN', 'Ci', 'Co', 'V', 'allow_tf32'],
 )
+@triton.heuristics(heuristics_bwd_input)
 @triton.jit
 def sparse_submanifold_conv_bwd_input_implicit_gemm_kernel(
     grad_output,
@@ -24,6 +30,8 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_kernel(
     B2: tl.constexpr,   # Block size for Ci dimension
     BK: tl.constexpr,   # Block size for K dimension (V * Co)
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
+    # Heuristic parameters
+    NUM_K: tl.constexpr,  # = cdiv(Co, BK), constexpr for optimized divmod codegen
 ):
     """
     Sparse submanifold convolution backward to input kernel using implicit GEMM.
@@ -40,7 +48,6 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_kernel(
     block_id_n = block_id // block_dim_ci
     
     # Create pointers for submatrices of A and B.
-    num_k = tl.cdiv(Co, BK)  # Number of blocks in K dimension
     offset_n = (block_id_n * B1 + tl.arange(0, B1)) % N         # (B1,)
     offset_ci = (block_id_ci * B2 + tl.arange(0, B2)) % Ci      # (B2,)
     offset_k = tl.arange(0, BK)                                 # (BK,)
@@ -49,9 +56,9 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_kernel(
     accumulator = tl.zeros((B1, B2), dtype=tl.float32)    
     
     # Iterate along V*Co dimension.
-    for k in range(num_k * V):
-        v = k // num_k
-        bk = k % num_k
+    for k in range(NUM_K * V):
+        v = k // NUM_K
+        bk = k % NUM_K
         # Calculate pointers to grad_output matrix.
         neighbor_offset_n = tl.load(neighbor + offset_n * V + V - 1 - v)                                    # (B1,)
         grad_output_ptr = grad_output + bk * BK + (neighbor_offset_n[:, None].to(tl.int64) * Co + offset_k[None, :])     # (B1, BK)
@@ -75,9 +82,10 @@ def sparse_submanifold_conv_bwd_input_implicit_gemm_kernel(
     tl.store(grad_input_ptr, c, mask=grad_input_mask)
 
 
-heuristics = {
+heuristics_bwd_weight = {
     'BV': lambda meta: max(1, meta['B2'] // meta['Ci']),
     'BCi': lambda meta: min(meta['Ci'], meta['B2']),
+    'NUM_K': lambda meta: triton.cdiv(meta['N'], meta['BK']),
 }
 
     
@@ -85,7 +93,7 @@ heuristics = {
     configs=config.autotune_config,
     key=['LOGN', 'Ci', 'Co', 'V', 'allow_tf32'],
 )
-@triton.heuristics(heuristics)
+@triton.heuristics(heuristics_bwd_weight)
 @triton.jit
 def sparse_submanifold_conv_bwd_weight_implicit_gemm_kernel(
     grad_output,
@@ -101,6 +109,8 @@ def sparse_submanifold_conv_bwd_weight_implicit_gemm_kernel(
     BV: tl.constexpr,   # Block size for V dimension
     BCi: tl.constexpr,  # Block size for Ci dimension
     allow_tf32: tl.constexpr,  # Allow TF32 precision for matmuls
+    # Heuristic parameters
+    NUM_K: tl.constexpr,  # = cdiv(N, BK), constexpr for optimized loop bound
 ):
     """
     Sparse submanifold convolution backward to weight kernel using implicit GEMM.
@@ -115,7 +125,6 @@ def sparse_submanifold_conv_bwd_weight_implicit_gemm_kernel(
     block_id_vci = tl.program_id(axis=1)
     
     # Create pointers for submatrices of A and B.
-    num_k = tl.cdiv(N, BK)  # Number of blocks in K dimension
     offset_co = (block_id_co * B1 + tl.arange(0, B1)) % Co                          # (B1,)
     offset_v = (tl.arange(0, BV) + (block_id_vci // (Ci // BCi)) * BV) % V          # (BV,)
     offset_ci = (tl.arange(0, BCi) + (block_id_vci % (Ci // BCi)) * BCi) % Ci       # (BCi,)
@@ -127,7 +136,7 @@ def sparse_submanifold_conv_bwd_weight_implicit_gemm_kernel(
     accumulator = tl.zeros((B1, BV * BCi), dtype=tl.float32)   
     
     # Iterate along V*Ci dimension.
-    for k in range(num_k):
+    for k in range(NUM_K):
         mask = offset_k < N - k * BK
         # Calculate pointers to input matrix.
         input_offset_n = tl.load(neighbor_ptr, mask=mask[:, None], other=0xffffffff)            # (BK, BV)
