@@ -1,9 +1,36 @@
 from typing import *
+import dataclasses
 import torch
+from torch import Tensor
 from torch.autograd import Function
 from . import Algorithm
 from .. import spconv, utils
 from ... import kernels
+
+
+# All possible B1 (block size for N dimension) values across autotune configs.
+_ALL_BLOCK_SIZES = [32, 64, 128, 256]
+
+
+@dataclasses.dataclass
+class SpConvConfig:
+    """Frozen, compile-friendly config for sparse convolution.
+
+    All fields are tensors, lists of tensors, or plain ints/strings --
+    no Python objects or callbacks.  Obtain one via
+    :meth:`SubMConv3dNeighborCache.freeze`.
+    """
+
+    neighbor_map: Tensor                   # [N, V] uint32
+    sorted_idx: Tensor                     # [N] int64
+    valid_kernels: List[Tensor]            # len = len(block_sizes), per-B1 valid kernel indices
+    valid_kernel_segs: List[Tensor]        # len = len(block_sizes), per-B1 valid kernel segments
+    block_sizes: List[int]                 # e.g. [32, 64, 128, 256]
+    valid_signal_i: Tensor                 # [M] uint32
+    valid_signal_o: Tensor                 # [M] uint32
+    valid_signal_seg: Tensor               # [V+1] uint32
+    splitk: int = 1                        # autotuned SPLITK (1 = non-splitk path)
+    algorithm: str = "masked_implicit_gemm_splitk"
 
 
 class SubMConv3dNeighborCache:
@@ -31,6 +58,47 @@ class SubMConv3dNeighborCache:
         if not hasattr(self, f'valid_kernel_seg_{block_size}'):
             self.compute_kernel_idx(block_size)
         return self[f'valid_kernel_seg_{block_size}']
+
+    def freeze(self, splitk: int = 1, algorithm: str = "masked_implicit_gemm_splitk") -> SpConvConfig:
+        """Freeze this cache into a :class:`SpConvConfig` for ``torch.compile``.
+
+        Pre-computes ``valid_kernel`` / ``valid_kernel_seg`` for every
+        possible autotune block size so the compiled path never needs
+        a callback.
+
+        Args:
+            splitk: The SPLITK value to use.  Run one eager forward pass
+                first to let the ``@autotune`` decorator choose, then pass
+                the selected value here.  ``1`` means non-split-K.
+            algorithm: ``"masked_implicit_gemm"`` or
+                ``"masked_implicit_gemm_splitk"`` (default).
+
+        Returns:
+            A :class:`SpConvConfig` containing only tensors and plain ints.
+        """
+        assert hasattr(self, 'neighbor_map'), "neighbor_map is required"
+        assert hasattr(self, 'sorted_idx'), "sorted_idx is required (masked algorithm)"
+
+        block_sizes = _ALL_BLOCK_SIZES
+        valid_kernels: List[Tensor] = []
+        valid_kernel_segs: List[Tensor] = []
+        for bs in block_sizes:
+            self.compute_kernel_idx(bs)
+            valid_kernels.append(self[f'valid_kernel_{bs}'])
+            valid_kernel_segs.append(self[f'valid_kernel_seg_{bs}'])
+
+        return SpConvConfig(
+            neighbor_map=self['neighbor_map'],
+            sorted_idx=self['sorted_idx'],
+            valid_kernels=valid_kernels,
+            valid_kernel_segs=valid_kernel_segs,
+            block_sizes=block_sizes,
+            valid_signal_i=self['valid_signal_i'],
+            valid_signal_o=self['valid_signal_o'],
+            valid_signal_seg=self['valid_signal_seg'],
+            splitk=splitk,
+            algorithm=algorithm,
+        )
 
 
 class SubMConv3dFunction(Function):
@@ -342,31 +410,163 @@ class SubMConv3dFunction(Function):
         return grad_input, None, None, None, grad_weight, grad_bias, None
 
 
+class SubMConv3dCompiledFunction(Function):
+    """Compile-friendly autograd function for masked sparse convolution.
+
+    Takes only tensors and plain-int/str arguments -- no Python objects
+    or callbacks.  Use :meth:`SubMConv3dNeighborCache.freeze` to obtain
+    a :class:`SpConvConfig` whose fields are passed here.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        feats: Tensor,
+        weight: Tensor,
+        bias: Optional[Tensor],
+        neighbor_map: Tensor,
+        sorted_idx: Tensor,
+        valid_kernels: List[Tensor],
+        valid_kernel_segs: List[Tensor],
+        block_sizes: List[int],
+        valid_signal_i: Tensor,
+        valid_signal_o: Tensor,
+        valid_signal_seg: Tensor,
+        splitk: int,
+        algorithm: str,
+    ) -> Tensor:
+        Co, V, Ci = weight.shape
+
+        if algorithm == "masked_implicit_gemm":
+            out = torch.ops.flex_gemm.sparse_conv_masked_fwd(
+                feats, weight, bias, neighbor_map, sorted_idx,
+                valid_kernels, valid_kernel_segs, block_sizes,
+            )
+        else:
+            out = torch.ops.flex_gemm.sparse_conv_masked_splitk_fwd(
+                feats, weight, bias, neighbor_map, sorted_idx,
+                valid_kernels, valid_kernel_segs, block_sizes,
+                splitk,
+            )
+
+        ctx.save_for_backward(
+            feats, weight, bias,
+            neighbor_map, sorted_idx,
+            *valid_kernels, *valid_kernel_segs,
+            valid_signal_i, valid_signal_o, valid_signal_seg,
+        )
+        ctx.num_block_sizes = len(block_sizes)
+        ctx.block_sizes = block_sizes
+        ctx.splitk = splitk
+        ctx.algorithm = algorithm
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor):
+        saved = ctx.saved_tensors
+        n = ctx.num_block_sizes
+        feats, weight, bias = saved[0], saved[1], saved[2]
+        neighbor_map, sorted_idx = saved[3], saved[4]
+        valid_kernels = list(saved[5 : 5 + n])
+        valid_kernel_segs = list(saved[5 + n : 5 + 2 * n])
+        valid_signal_i = saved[5 + 2 * n]
+        valid_signal_o = saved[5 + 2 * n + 1]
+        valid_signal_seg = saved[5 + 2 * n + 2]
+        Co, V, Ci = weight.shape
+
+        if ctx.algorithm == "masked_implicit_gemm":
+            grad_input, grad_weight, grad_bias = (
+                torch.ops.flex_gemm.sparse_conv_masked_bwd(
+                    grad_output, feats, weight, bias,
+                    neighbor_map, sorted_idx,
+                    valid_kernels, valid_kernel_segs, ctx.block_sizes,
+                    valid_signal_i, valid_signal_o, valid_signal_seg,
+                )
+            )
+        else:
+            grad_input, grad_weight, grad_bias = (
+                torch.ops.flex_gemm.sparse_conv_masked_splitk_bwd(
+                    grad_output, feats, weight, bias,
+                    neighbor_map, sorted_idx,
+                    valid_kernels, valid_kernel_segs, ctx.block_sizes,
+                    valid_signal_i, valid_signal_o, valid_signal_seg,
+                    ctx.splitk,
+                )
+            )
+
+        grad_weight = grad_weight.reshape(weight.shape)
+
+        # Return gradients for: feats, weight, bias, neighbor_map, sorted_idx,
+        #   valid_kernels..., valid_kernel_segs...,
+        #   valid_signal_i, valid_signal_o, valid_signal_seg,
+        #   splitk, algorithm
+        none_list = [None] * (2 * n)  # for valid_kernels + valid_kernel_segs
+        return (
+            grad_input, grad_weight, grad_bias,
+            None, None,              # neighbor_map, sorted_idx
+            *none_list,              # valid_kernels, valid_kernel_segs
+            None, None, None,        # valid_signal_i/o/seg
+            None, None,              # splitk, algorithm
+        )
+
+
 def sparse_submanifold_conv3d(
     feats: torch.Tensor,
-    coords: torch.Tensor,
-    shape: torch.Size,
-    weight: torch.Tensor,
+    coords: torch.Tensor = None,
+    shape: torch.Size = None,
+    weight: torch.Tensor = None,
     bias: Optional[torch.Tensor] = None,
     neighbor_cache: Optional[SubMConv3dNeighborCache] = None,
     dilation: Tuple[int, int, int] = (1, 1, 1),
-) -> Tuple[torch.Tensor, SubMConv3dNeighborCache]:
+    *,
+    config: Optional[SpConvConfig] = None,
+) -> Union[Tuple[torch.Tensor, SubMConv3dNeighborCache], torch.Tensor]:
     """
     Sparse submanifold convolution for 3D input.
 
+    Supports two modes:
+
+    **Legacy mode** (``config=None``): returns ``(output, neighbor_cache)``.
+
+    **Compiled mode** (``config=SpConvConfig``): returns ``output`` only.
+    All neighbor-structure data comes from the frozen config -- no Python
+    objects cross the ``torch.compile`` boundary.
+
     Args:
         feats (torch.Tensor): [N, C] tensor of input features.
-        coords (torch.Tensor): [N, 4] tensor of input coordinates.
-        shape (torch.Size): shape of the input tensor in NCWHD order.
+        coords (torch.Tensor): [N, 4] tensor of input coordinates (legacy only).
+        shape (torch.Size): shape of the input tensor in NCWHD order (legacy only).
         weight (torch.Tensor): [Co, Kw, Kh, Kd, Ci] tensor of weights.
         bias (Optional[torch.Tensor]): [Co] tensor of biases.
-        neighbor_cache (Optional[SubMConv3dNeighborCache]): neighbor cache for forward.
-            if None, will be computed in forward.
-        dilation (Tuple[int, int, int]): dilation rate.
+        neighbor_cache: neighbor cache for forward (legacy only).
+        dilation: dilation rate (legacy only).
+        config: frozen :class:`SpConvConfig` for the compiled path.
 
     Returns:
-        Tuple[torch.Tensor, SubMConv3dNeighborCache]:
-            - output (torch.Tensor): [N, Co] tensor of output features.
-            - neighbor_cache (SubMConv3dNeighborCache): neighbor cache for backward.
+        Legacy mode: ``(output, neighbor_cache)``
+        Compiled mode: ``output``
     """
-    return SubMConv3dFunction.apply(feats, coords, shape, neighbor_cache, weight, bias, dilation)
+    if config is not None:
+        # ---- Compiled path: pure tensor args, no Python objects ----
+        Co, Kw, Kh, Kd, Ci = weight.shape
+        V = Kw * Kh * Kd
+        return SubMConv3dCompiledFunction.apply(
+            feats,
+            weight.reshape(Co, V, Ci),
+            bias,
+            config.neighbor_map,
+            config.sorted_idx,
+            config.valid_kernels,
+            config.valid_kernel_segs,
+            config.block_sizes,
+            config.valid_signal_i,
+            config.valid_signal_o,
+            config.valid_signal_seg,
+            config.splitk,
+            config.algorithm,
+        )
+    else:
+        # ---- Legacy path: unchanged ----
+        return SubMConv3dFunction.apply(
+            feats, coords, shape, neighbor_cache, weight, bias, dilation
+        )

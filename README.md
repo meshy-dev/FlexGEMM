@@ -68,6 +68,51 @@ out_feats, neighbor_cache = sparse_submanifold_conv3d(
 out_feats.sum().backward()
 ```
 
+### Using with `torch.compile`
+
+FlexGEMM supports `torch.compile` via custom op wrappers. The key idea
+is to **separate preparation from computation**: build the neighbor
+cache once (outside compile), freeze it into a `SpConvConfig`, then use
+that config inside the compiled region.
+
+```python
+import torch
+import flex_gemm
+from flex_gemm.ops.spconv import (
+    Algorithm, SpConvConfig, set_algorithm, sparse_submanifold_conv3d,
+)
+
+# --- Phase 1: Preparation (outside torch.compile, run once) ---
+
+feats, coords, shape = ...  # your sparse voxel data
+weight = torch.randn(Co, Ks, Ks, Ks, Ci, device='cuda', requires_grad=True)
+bias = torch.randn(Co, device='cuda', requires_grad=True)
+
+set_algorithm(Algorithm.MASKED_IMPLICIT_GEMM_SPLITK)
+
+# Run one eager forward pass to build the neighbor cache and warm up autotune
+with torch.no_grad():
+    _, neighbor_cache = sparse_submanifold_conv3d(feats, coords, shape, weight, bias)
+
+# Freeze: pre-computes all block-size variants, returns a compile-friendly config
+config = neighbor_cache.freeze()
+
+# --- Phase 2: Compiled training loop ---
+
+@torch.compile
+def train_step(feats, weight, bias):
+    # Pass config= to use the compiled path (returns output only, no cache)
+    out = sparse_submanifold_conv3d(feats, weight=weight, bias=bias, config=config)
+    return out.sum()
+
+loss = train_step(feats, weight, bias)
+loss.backward()
+```
+
+> **Note**: The `config=` path is only needed for `torch.compile`.
+> The legacy API (`sparse_submanifold_conv3d(feats, coords, shape, weight, bias)`)
+> continues to work unchanged for eager execution.
+
 ## 📊 Performance
 
 FlexGEMM demonstrates significant speed improvements over existing baselines.
