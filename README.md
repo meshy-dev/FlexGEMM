@@ -71,16 +71,15 @@ out_feats.sum().backward()
 ### Using with `torch.compile`
 
 FlexGEMM supports `torch.compile` via custom op wrappers. The key idea
-is to **separate preparation from computation**: build the neighbor
-cache once (outside compile), freeze it into a `SpConvConfig`, then use
-that config inside the compiled region.
+is to **separate geometry preparation from computation**: build the
+neighbor cache once from geometry (outside compile), freeze it into a
+`SpConvConfig`, then use that config inside the compiled region.
 
 ```python
 import torch
 import flex_gemm
-from flex_gemm.ops.spconv import (
-    Algorithm, SpConvConfig, set_algorithm, sparse_submanifold_conv3d,
-)
+from flex_gemm.ops.spconv import sparse_submanifold_conv3d
+from flex_gemm.ops.spconv.submanifold_conv3d import SubMConv3dFunction
 
 # --- Phase 1: Preparation (outside torch.compile, run once) ---
 
@@ -88,11 +87,11 @@ feats, coords, shape = ...  # your sparse voxel data
 weight = torch.randn(Co, Ks, Ks, Ks, Ci, device='cuda', requires_grad=True)
 bias = torch.randn(Co, device='cuda', requires_grad=True)
 
-set_algorithm(Algorithm.MASKED_IMPLICIT_GEMM_SPLITK)
-
-# Run one eager forward pass to build the neighbor cache and warm up autotune
-with torch.no_grad():
-    _, neighbor_cache = sparse_submanifold_conv3d(feats, coords, shape, weight, bias)
+# Build neighbor cache directly from geometry (no forward pass needed).
+# Uses the default algorithm (MASKED_IMPLICIT_GEMM_SPLITK).
+neighbor_cache = SubMConv3dFunction._compute_neighbor_cache(
+    coords, shape, (Ks, Ks, Ks), (1, 1, 1),
+)
 
 # Freeze: pre-computes all block-size variants, returns a compile-friendly config
 config = neighbor_cache.freeze()
