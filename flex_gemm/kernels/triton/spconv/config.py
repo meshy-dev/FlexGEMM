@@ -26,6 +26,25 @@ autotune_config = get_autotune_config(
         ]
     },
     device={
+        'H100': [
+            # H100 SXM: 132 SMs, HBM3 3.35 TB/s, 4th-gen Tensor Cores, TMA
+            # Superset of generic CUDA configs (proven on H100) plus BK=64 additions
+            # for large problems where fewer loop iterations help.
+            # Accum regs/thread = B1*B2/(num_warps*32)
+            # -- Proven generic CUDA winners (BK=32, stages=4-5) --
+            triton.Config({'B1': 128, 'B2': 256, 'BK': 64}, num_stages=3, num_warps=8),
+            triton.Config({'B1': 64,  'B2': 256, 'BK': 32}, num_stages=4, num_warps=4),
+            triton.Config({'B1': 128, 'B2': 128, 'BK': 32}, num_stages=4, num_warps=4),
+            triton.Config({'B1': 128, 'B2': 64,  'BK': 32}, num_stages=4, num_warps=4),
+            triton.Config({'B1': 64,  'B2': 128, 'BK': 32}, num_stages=4, num_warps=4),
+            triton.Config({'B1': 128, 'B2': 32,  'BK': 32}, num_stages=4, num_warps=4),
+            triton.Config({'B1': 64,  'B2': 32,  'BK': 32}, num_stages=5, num_warps=2),
+            triton.Config({'B1': 32,  'B2': 64,  'BK': 32}, num_stages=5, num_warps=2),
+            # -- BK=64 additions for large N / high Co --
+            triton.Config({'B1': 64,  'B2': 256, 'BK': 64}, num_stages=3, num_warps=8),
+            triton.Config({'B1': 128, 'B2': 128, 'BK': 64}, num_stages=3, num_warps=8),
+            triton.Config({'B1': 64,  'B2': 128, 'BK': 64}, num_stages=3, num_warps=4),
+        ],
         'B200': [
             # Accum regs/thread = B1*B2/(num_warps*32), keep <=64 for 2+ blocks/SM
             # Key findings from profiling (RES=128, C=512, N=64160):
