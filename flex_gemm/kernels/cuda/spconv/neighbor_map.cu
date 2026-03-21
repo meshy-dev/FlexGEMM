@@ -305,10 +305,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     auto sorted_idx = torch::argsort(binary_code);
 
     // Indexing from mask
+    // NOTE: We allocate with max possible size (N * V) to avoid D2H sync from .item() call.
+    // The actual valid count is stored in valid_signal_seg[-1].
     auto prefix_sum_neighbor_mask = torch::cumsum(neigh_mask_T, 0, torch::kInt32);
-    auto total_valid_signal = prefix_sum_neighbor_mask[-1].item<int32_t>();
-    auto valid_signal_i = torch::empty({total_valid_signal}, torch::dtype(torch::kUInt32).device(neighbor_map.device()));
-    auto valid_signal_o = torch::empty({total_valid_signal}, torch::dtype(torch::kUInt32).device(neighbor_map.device()));
+    auto valid_signal_i = torch::empty({N * V}, torch::dtype(torch::kUInt32).device(neighbor_map.device()));
+    auto valid_signal_o = torch::empty({N * V}, torch::dtype(torch::kUInt32).device(neighbor_map.device()));
     auto valid_signal_seg = torch::empty({V + 1}, torch::dtype(torch::kUInt32).device(neighbor_map.device()));
     gather_idx_val_seg_from_prefix_sum_cuda_kernel<<<
         (N * V + BLOCK_SIZE - 1) / BLOCK_SIZE,
@@ -436,7 +437,8 @@ std::tuple<torch::Tensor, torch::Tensor> neighbor_map_post_process_for_masked_im
     seglen = torch::cumsum(seglen, 0, torch::kInt32);
 
     // Scatter reduced code to valid kernel indices
-    auto valid_kernel_idx = torch::empty({seglen[-1].item<int32_t>()}, torch::dtype(torch::kInt32).device(gray_code.device()));
+    // auto valid_kernel_idx = torch::empty({seglen[-1].item<int32_t>()}, torch::dtype(torch::kInt32).device(gray_code.device()));
+    auto valid_kernel_idx = torch::empty({num_blocks * 32}, torch::dtype(torch::kInt32).device(gray_code.device()));
     scatter_reduced_code_cuda_kernel<<<
         (num_blocks + BLOCK_SIZE - 1) / BLOCK_SIZE,
         BLOCK_SIZE

@@ -25,6 +25,8 @@ It implements **Explicit**, **Implicit**, and **Masked Implicit** algorithm vari
 * **PyTorch** ≥ 2.4.0
 * **Triton** ≥ 3.2.0
 
+> **[WIP]** BF16 precision support is under development on this branch.
+
 ### Install via pip
 ```bash
 git clone https://github.com/JeffreyXiang/FlexGEMM.git
@@ -67,6 +69,50 @@ out_feats, neighbor_cache = sparse_submanifold_conv3d(
 # 5. Backward Pass
 out_feats.sum().backward()
 ```
+
+### Using with `torch.compile`
+
+FlexGEMM supports `torch.compile` via custom op wrappers. The key idea
+is to **separate geometry preparation from computation**: build the
+neighbor cache once from geometry (outside compile), freeze it into a
+`SpConvConfig`, then use that config inside the compiled region.
+
+```python
+import torch
+import flex_gemm
+from flex_gemm.ops.spconv import sparse_submanifold_conv3d
+from flex_gemm.ops.spconv.submanifold_conv3d import SubMConv3dFunction
+
+# --- Phase 1: Preparation (outside torch.compile, run once) ---
+
+feats, coords, shape = ...  # your sparse voxel data
+weight = torch.randn(Co, Ks, Ks, Ks, Ci, device='cuda', requires_grad=True)
+bias = torch.randn(Co, device='cuda', requires_grad=True)
+
+# Build neighbor cache directly from geometry (no forward pass needed).
+# Uses the default algorithm (MASKED_IMPLICIT_GEMM_SPLITK).
+neighbor_cache = SubMConv3dFunction._compute_neighbor_cache(
+    coords, shape, (Ks, Ks, Ks), (1, 1, 1),
+)
+
+# Freeze: pre-computes all block-size variants, returns a compile-friendly config
+config = neighbor_cache.freeze()
+
+# --- Phase 2: Compiled training loop ---
+
+@torch.compile
+def train_step(feats, weight, bias):
+    # Pass config= to use the compiled path (returns output only, no cache)
+    out = sparse_submanifold_conv3d(feats, weight=weight, bias=bias, config=config)
+    return out.sum()
+
+loss = train_step(feats, weight, bias)
+loss.backward()
+```
+
+> **Note**: The `config=` path is only needed for `torch.compile`.
+> The legacy API (`sparse_submanifold_conv3d(feats, coords, shape, weight, bias)`)
+> continues to work unchanged for eager execution.
 
 ## 📊 Performance
 

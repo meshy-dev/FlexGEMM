@@ -33,9 +33,9 @@ def encode_seq(
         raise ValueError(f"Spatial dimensions are too large: {shape}")
     
     if mode == 'z_order':
-        kernels.cuda.z_order_encode(coords, bit_length, codes)
+        torch.ops.flex_gemm.z_order_encode(coords, bit_length, codes)
     elif mode == 'hilbert':
-        kernels.cuda.hilbert_encode(coords, bit_length, codes)
+        torch.ops.flex_gemm.hilbert_encode(coords, bit_length, codes)
     else:
         raise ValueError(f"Unknown encoding mode: {mode}")
     
@@ -61,9 +61,9 @@ def decode_seq(
     bit_length = max_coord.bit_length()
     
     if mode == 'z_order':
-        coords = kernels.cuda.z_order_decode(code, bit_length)
+        coords = torch.ops.flex_gemm.z_order_decode(code, bit_length)
     elif mode == 'hilbert':
-        coords = kernels.cuda.hilbert_decode(code, bit_length)
+        coords = torch.ops.flex_gemm.hilbert_decode(code, bit_length)
     else:
         raise ValueError(f"Unknown decoding mode: {mode}")
     

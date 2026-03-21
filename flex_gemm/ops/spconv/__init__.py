@@ -21,4 +21,10 @@ def set_hashmap_ratio(ratio: float):
     HASHMAP_RATIO = ratio
 
 
-from .submanifold_conv3d import SubMConv3dFunction, sparse_submanifold_conv3d
+from .submanifold_conv3d import (
+    SubMConv3dFunction,
+    SubMConv3dNeighborCache,
+    SpConvConfig,
+    sparse_submanifold_conv3d,
+)
+from . import _custom_ops as _spconv_custom_ops  # noqa: F401 — registers custom ops
