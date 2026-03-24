@@ -1,7 +1,7 @@
 """
 Custom op wrappers for FlexGEMM CUDA extension functions.
 
-Registers all pybind11 CUDA extension ops as ``torch.library`` custom ops
+Registers the eight pybind11 CUDA extension ops as ``torch.library`` custom ops
 with FakeTensor implementations so that ``torch.compile`` can trace through
 them without graph breaks.
 
@@ -12,12 +12,10 @@ can then be called via::
     torch.ops.flex_gemm.<op_name>(...)
 """
 
-from typing import Tuple
-
 import torch
 from torch import Tensor
 
-from . import cuda as _C
+from . import cuda as _cuda_mod
 
 
 # ============================================================
@@ -36,7 +34,7 @@ def hashmap_insert_cuda(
     values: Tensor,
 ) -> None:
     """Insert *keys* / *values* into the hashmap."""
-    _C.hashmap_insert_cuda(hashmap_keys, hashmap_values, keys, values)
+    _cuda_mod.hashmap_insert_cuda(hashmap_keys, hashmap_values, keys, values)
 
 
 @hashmap_insert_cuda.register_fake
@@ -59,7 +57,7 @@ def hashmap_lookup_cuda(
     keys: Tensor,
 ) -> Tensor:
     """Lookup *keys* in the hashmap, returning corresponding values."""
-    return _C.hashmap_lookup_cuda(hashmap_keys, hashmap_values, keys)
+    return _cuda_mod.hashmap_lookup_cuda(hashmap_keys, hashmap_values, keys)
 
 
 @hashmap_lookup_cuda.register_fake
@@ -88,7 +86,7 @@ def hashmap_insert_3d_cuda(
     D: int,
 ) -> None:
     """Insert 3-D coordinates into the hashmap."""
-    _C.hashmap_insert_3d_cuda(
+    _cuda_mod.hashmap_insert_3d_cuda(
         hashmap_keys, hashmap_values, coords, values, W, H, D
     )
 
@@ -121,7 +119,7 @@ def hashmap_lookup_3d_cuda(
     D: int,
 ) -> Tensor:
     """Lookup 3-D coordinates in the hashmap."""
-    return _C.hashmap_lookup_3d_cuda(
+    return _cuda_mod.hashmap_lookup_3d_cuda(
         hashmap_keys, hashmap_values, coords, W, H, D
     )
 
@@ -154,7 +152,7 @@ def hashmap_insert_3d_idx_as_val_cuda(
     D: int,
 ) -> None:
     """Insert 3-D coordinates into the hashmap using the row index as value."""
-    _C.hashmap_insert_3d_idx_as_val_cuda(
+    _cuda_mod.hashmap_insert_3d_idx_as_val_cuda(
         hashmap_keys, hashmap_values, coords, W, H, D
     )
 
@@ -169,159 +167,6 @@ def _(
     D: int,
 ) -> None:
     pass
-
-
-# ============================================================
-# Serialization ops
-# ============================================================
-
-
-@torch.library.custom_op(
-    "flex_gemm::z_order_encode", mutates_args=("codes",)
-)
-def z_order_encode(
-    coords: Tensor,
-    bit_length: int,
-    codes: Tensor,
-) -> None:
-    """Z-order encode 3-D coordinates (writes into *codes* in-place)."""
-    _C.z_order_encode(coords, bit_length, codes)
-
-
-@z_order_encode.register_fake
-def _(coords: Tensor, bit_length: int, codes: Tensor) -> None:
-    pass
-
-
-# ------------------------------------------------------------------
-
-
-@torch.library.custom_op("flex_gemm::z_order_decode", mutates_args=())
-def z_order_decode(
-    codes: Tensor,
-    bit_length: int,
-) -> Tensor:
-    """Z-order decode to ``[N, 4]`` (b, x, y, z) coordinates."""
-    return _C.z_order_decode(codes, bit_length)
-
-
-@z_order_decode.register_fake
-def _(codes: Tensor, bit_length: int) -> Tensor:
-    return torch.empty(codes.shape[0], 4, dtype=torch.int32, device=codes.device)
-
-
-# ------------------------------------------------------------------
-
-
-@torch.library.custom_op(
-    "flex_gemm::hilbert_encode", mutates_args=("codes",)
-)
-def hilbert_encode(
-    coords: Tensor,
-    bit_length: int,
-    codes: Tensor,
-) -> None:
-    """Hilbert encode 3-D coordinates (writes into *codes* in-place)."""
-    _C.hilbert_encode(coords, bit_length, codes)
-
-
-@hilbert_encode.register_fake
-def _(coords: Tensor, bit_length: int, codes: Tensor) -> None:
-    pass
-
-
-# ------------------------------------------------------------------
-
-
-@torch.library.custom_op("flex_gemm::hilbert_decode", mutates_args=())
-def hilbert_decode(
-    codes: Tensor,
-    bit_length: int,
-) -> Tensor:
-    """Hilbert decode to ``[N, 4]`` (b, x, y, z) coordinates."""
-    return _C.hilbert_decode(codes, bit_length)
-
-
-@hilbert_decode.register_fake
-def _(codes: Tensor, bit_length: int) -> Tensor:
-    return torch.empty(codes.shape[0], 4, dtype=torch.int32, device=codes.device)
-
-
-# ============================================================
-# Grid-sample ops
-# ============================================================
-
-
-@torch.library.custom_op(
-    "flex_gemm::hashmap_build_grid_sample_3d_nearest_neighbor_map",
-    mutates_args=("hashmap_keys", "hashmap_vals"),
-)
-def hashmap_build_grid_sample_3d_nearest_neighbor_map(
-    hashmap_keys: Tensor,
-    hashmap_vals: Tensor,
-    coords: Tensor,
-    grid: Tensor,
-    W: int,
-    H: int,
-    D: int,
-) -> Tensor:
-    """Build ``[B, L]`` uint32 nearest-neighbor index map."""
-    return _C.hashmap_build_grid_sample_3d_nearest_neighbor_map(
-        hashmap_keys, hashmap_vals, coords, grid, W, H, D
-    )
-
-
-@hashmap_build_grid_sample_3d_nearest_neighbor_map.register_fake
-def _(
-    hashmap_keys: Tensor,
-    hashmap_vals: Tensor,
-    coords: Tensor,
-    grid: Tensor,
-    W: int,
-    H: int,
-    D: int,
-) -> Tensor:
-    B, L = grid.shape[:2]
-    return torch.empty(B, L, dtype=torch.uint32, device=grid.device)
-
-
-# ------------------------------------------------------------------
-
-
-@torch.library.custom_op(
-    "flex_gemm::hashmap_build_grid_sample_3d_trilinear_neighbor_map_weight",
-    mutates_args=("hashmap_keys", "hashmap_vals"),
-)
-def hashmap_build_grid_sample_3d_trilinear_neighbor_map_weight(
-    hashmap_keys: Tensor,
-    hashmap_vals: Tensor,
-    coords: Tensor,
-    grid: Tensor,
-    W: int,
-    H: int,
-    D: int,
-) -> Tuple[Tensor, Tensor]:
-    """Build ``[B, L, 8]`` trilinear neighbor indices and weights."""
-    return _C.hashmap_build_grid_sample_3d_trilinear_neighbor_map_weight(
-        hashmap_keys, hashmap_vals, coords, grid, W, H, D
-    )
-
-
-@hashmap_build_grid_sample_3d_trilinear_neighbor_map_weight.register_fake
-def _(
-    hashmap_keys: Tensor,
-    hashmap_vals: Tensor,
-    coords: Tensor,
-    grid: Tensor,
-    W: int,
-    H: int,
-    D: int,
-) -> Tuple[Tensor, Tensor]:
-    B, L = grid.shape[:2]
-    return (
-        torch.empty(B, L, 8, dtype=torch.uint32, device=grid.device),
-        grid.new_empty(B, L, 8),
-    )
 
 
 # ============================================================
@@ -348,7 +193,7 @@ def hashmap_build_submanifold_conv_neighbour_map_cuda(
     Dd: int,
 ) -> Tensor:
     """Build ``[M, Kw*Kh*Kd]`` uint32 submanifold convolution neighbor map."""
-    return _C.hashmap_build_submanifold_conv_neighbour_map_cuda(
+    return _cuda_mod.hashmap_build_submanifold_conv_neighbour_map_cuda(
         hashmap_keys, hashmap_vals, coords, W, H, D, Kw, Kh, Kd, Dw, Dh, Dd
     )
 
@@ -382,7 +227,7 @@ def _(
 )
 def neighbor_map_post_process_for_masked_implicit_gemm_1(
     neighbor_map: Tensor,
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Post-process neighbor map into gray code, sorted indices, and valid signals.
 
     Returns:
@@ -392,7 +237,7 @@ def neighbor_map_post_process_for_masked_implicit_gemm_1(
         valid_signal_o ``[L]`` uint32,
         valid_signal_seg ``[V+1]`` uint32.
     """
-    return _C.neighbor_map_post_process_for_masked_implicit_gemm_1(
+    return _cuda_mod.neighbor_map_post_process_for_masked_implicit_gemm_1(
         neighbor_map
     )
 
@@ -400,7 +245,7 @@ def neighbor_map_post_process_for_masked_implicit_gemm_1(
 @neighbor_map_post_process_for_masked_implicit_gemm_1.register_fake
 def _(
     neighbor_map: Tensor,
-) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     N = neighbor_map.shape[0]
     V = neighbor_map.shape[1]
     ctx = torch.library.get_ctx()
@@ -426,14 +271,14 @@ def neighbor_map_post_process_for_masked_implicit_gemm_2(
     gray_code: Tensor,
     sorted_idx: Tensor,
     block_size: int,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """Compute valid kernel indices for masked implicit GEMM.
 
     Returns:
         valid_kernel_idx ``[L]`` int32 (data-dependent *L*),
         seglen ``[num_blocks+1]`` int32.
     """
-    return _C.neighbor_map_post_process_for_masked_implicit_gemm_2(
+    return _cuda_mod.neighbor_map_post_process_for_masked_implicit_gemm_2(
         gray_code, sorted_idx, block_size
     )
 
@@ -443,7 +288,7 @@ def _(
     gray_code: Tensor,
     sorted_idx: Tensor,
     block_size: int,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     N = gray_code.shape[0]
     num_blocks = (N + block_size - 1) // block_size
     ctx = torch.library.get_ctx()

@@ -1,5 +1,7 @@
 import builtins
-from typing import *
+from typing import Any
+
+import importlib.resources
 import os
 import json
 import importlib
@@ -26,7 +28,7 @@ class TritonPersistentCacheAutotuner(triton.runtime.Autotuner):
         restore_value,
         pre_hook=None,
         post_hook=None,
-        prune_configs_by: Dict = None,
+        prune_configs_by: dict[str, Any] | None = None,
         warmup=None,
         rep=None,
         use_cuda_graph=False,
@@ -158,7 +160,7 @@ def triton_autotune(configs, key, prune_configs_by=None, reset_to_zero=None, res
     :param prune_configs_by: a dict of functions that are used to prune configs, fields:
         'perf_model': performance model used to predicate running time with different configs, returns running time
         'top_k': number of configs to bench
-        'early_config_prune'(optional): a function used to do early prune (eg, num_stages). It takes configs:List[Config] as its input, and returns pruned configs.
+        'early_config_prune'(optional): a function used to do early prune (eg, num_stages). It takes configs: list[Config] as its input, and returns pruned configs.
     :param reset_to_zero: a list of argument names whose value will be reset to zero before evaluating any configs.
     :type reset_to_zero: list[str]
     :param restore_value: a list of argument names whose value will be restored after evaluating any configs.
@@ -365,20 +367,42 @@ def save_autotune_cache(path=None):
         os.replace(tmp_path, path)
 
 
+def _load_bundled_autotune_cache_dict() -> dict | None:
+    """Default seed cache shipped inside the wheel (replaces install-time copy to ~/.flex_gemm)."""
+    try:
+        ref = importlib.resources.files("flex_gemm") / "autotune_cache.json"
+    except (ModuleNotFoundError, TypeError):
+        return None
+    if not ref.is_file():
+        return None
+    with ref.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def load_autotune_cache(path_or_cache=None):
     cache = None
 
     # Preserve path-based loading, but allow callers to provide a preloaded cache object.
     if path_or_cache is None or isinstance(path_or_cache, (str, os.PathLike)):
-        path = path_or_cache or AUTOTUNE_CACHE_PATH
+        if isinstance(path_or_cache, (str, os.PathLike)):
+            path = os.fspath(path_or_cache)
+            allow_bundled_fallback = False
+        else:
+            path = AUTOTUNE_CACHE_PATH
+            allow_bundled_fallback = True
+
         lock_path = path + ".lock"
 
-        if not os.path.exists(path):
+        if os.path.exists(path):
+            with FileLock(lock_path):
+                with open(path, encoding="utf-8") as f:
+                    cache = json.load(f)
+        elif allow_bundled_fallback:
+            cache = _load_bundled_autotune_cache_dict()
+            if cache is None:
+                return
+        else:
             return
-
-        with FileLock(lock_path):
-            with open(path, 'r') as f:
-                cache = json.load(f)
     elif isinstance(path_or_cache, Mapping):
         cache = path_or_cache
     else:

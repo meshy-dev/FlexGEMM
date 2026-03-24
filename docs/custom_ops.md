@@ -2,7 +2,7 @@
 
 ## Motivation
 
-FlexGEMM's CUDA extensions (hashmap, serialization, neighbor-map) and
+FlexGEMM's CUDA extensions (hashmap, spconv neighbor-map) and
 Triton kernel launchers were originally exposed via pybind11 or plain
 Python functions. `torch.compile` cannot trace through either of these,
 causing **graph breaks** at every kernel call.
@@ -43,46 +43,39 @@ compatible with `torch.compile`.
 
 ## What Changed
 
+### Neighbor-map build mode (`searchsorted` vs hashmap)
+
+**Module**: `flex_gemm/ops/spconv/__init__.py`
+
+- ``spconv.set_spatial_index_mode("hashmap")`` (default): build ``neighbor_map`` with the CUDA hashmap path (fast on GPU).
+- ``spconv.set_spatial_index_mode("searchsorted")``: build the same ``[N, V]`` map with sorted **batched 48+16 Morton keys** (same encoding as ``meshy_sparse.morton3d_16`` on ``[L, 4]`` coords) + :func:`torch.searchsorted`. On CUDA, Morton encoding uses pybind kernels ``morton_keys_batched_ncwhd_cuda`` / ``morton_keys_3d_16_cuda``; on CPU, use the PyTorch references in ``morton_key.py``. Use ``set_searchsorted_skip_k(k)`` for ``skip_k`` (``0..15``). Masked post-process still uses CUDA.
+
 ### Layer 1: CUDA Extension Ops
 
 **File**: `flex_gemm/kernels/_cuda_custom_ops.py` (new)
 
-All 14 pybind11 CUDA functions are wrapped with `@torch.library.custom_op`
+The underlying pybind module is JIT-built via `flex_gemm/kernels/_cuda_jit.py`
+(`torch.utils.cpp_extension.load`), not a build-time `CUDAExtension`. Python
+access goes through `flex_gemm/kernels/cuda.py`, which loads the extension on
+first attribute use.
+
+Two additional pybind entry points (Morton only) are exposed directly on the
+JIT module (``kernels.cuda.morton_keys_*_cuda``), not as ``torch.ops.flex_gemm``:
+
+``morton_keys_3d_16_cuda``, ``morton_keys_batched_ncwhd_cuda``.
+
+All 8 spconv/hashmap pybind11 CUDA functions are wrapped with `@torch.library.custom_op`
 and `register_fake`:
 
 | Category | Ops | `mutates_args` |
 |----------|-----|----------------|
 | Hashmap | `hashmap_insert_cuda`, `hashmap_lookup_cuda`, `hashmap_insert_3d_cuda`, `hashmap_lookup_3d_cuda`, `hashmap_insert_3d_idx_as_val_cuda` | insert ops mutate hashmap |
-| Serialize | `z_order_encode`, `z_order_decode`, `hilbert_encode`, `hilbert_decode` | encode mutates codes |
-| Grid sample | `hashmap_build_grid_sample_3d_nearest_neighbor_map`, `hashmap_build_grid_sample_3d_trilinear_neighbor_map_weight` | mutate hashmap |
 | Spconv | `hashmap_build_submanifold_conv_neighbour_map_cuda`, `neighbor_map_post_process_for_masked_implicit_gemm_1`, `neighbor_map_post_process_for_masked_implicit_gemm_2` | mutate hashmap |
 
 **Key detail**: Ops with data-dependent output sizes (post-process ops) use
 `torch.library.get_ctx().new_dynamic_size()` for unbacked SymInts.
 
-### Layer 2: Triton Kernel Launchers
-
-**Files**: `indice_weighed_sum_fwd.py`, `indice_weighed_sum_bwd.py`
-
-Each Triton launcher is split into:
-
-- `_impl(...)` -- raw kernel launch (no dispatcher)
-- `@torch.library.custom_op` wrapper -- delegates to `_impl`
-
-This avoids **nested custom_op dispatch** (custom_op A calling custom_op B
-would dispatch B to FakeTensor during compiled execution).
-
-### Layer 3: Grid Sample
-
-**File**: `flex_gemm/ops/grid_sample/grid_sample.py`
-
-- 3 custom ops: `_grid_sample_3d_nearest_fwd`, `_grid_sample_3d_trilinear_fwd`,
-  `_grid_sample_3d_trilinear_bwd`
-- `GridSample3dFunction` uses old-style `forward(ctx, ...)` returning a single
-  Tensor (avoids `setup_context` + `mark_non_differentiable` compile issues)
-- Public API `grid_sample_3d(...)` unchanged
-
-### Layer 4: Sparse Convolution (Compiled Path)
+### Layer 2: Sparse Convolution (Compiled Path)
 
 **Files**: `flex_gemm/ops/spconv/submanifold_conv3d.py`, `flex_gemm/ops/spconv/_custom_ops.py`
 
@@ -145,9 +138,6 @@ implementations (to avoid nested dispatch).
 | File | Calls changed |
 |------|---------------|
 | `ops/spconv/submanifold_conv3d.py` | 4 |
-| `ops/serialize.py` | 4 |
-| `ops/grid_sample/grid_sample_torch.py` | 4 |
-| `ops/grid_sample/grid_sample.py` | 0 (kept raw, inside custom_op) |
 
 ---
 

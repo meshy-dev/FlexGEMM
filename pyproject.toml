@@ -1,25 +1,57 @@
 [build-system]
-requires = [
-    "setuptools>=64",
-    "wheel",
-    "torch",
-]
-build-backend = "setuptools.build_meta"
-
+requires = ["hatchling>=1.24.2"]
+build-backend = "hatchling.build"
 
 [project]
 name = "flex_gemm"
-version = "1.0.0"
+version = "1.1.0"
 description = "A Cross-Platform Backend for High-Performance Sparse Convolutions"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [
+    { name = "Siyuan Shen", email = "siyuanshen@meshy.ai" },
+    { name = "Cheng Cao", email = "chengcao@meshy.ai" },
     { name = "Jianfeng Xiang", email = "belljig@outlook.com" }
 ]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
-    "torch>=2.4.0",
+    "torch>=2.6.0",
     "triton>=3.2.0; platform_system != 'Windows'",
     "triton-windows>=3.2.0; platform_system == 'Windows'",
     "filelock",
 ]
+
+[project.urls]
+Homepage = "https://github.com/JeffreyXiang/FlexGEMM"
+
+# Pure-Python (py3-none-any) wheel: CUDA is JIT-compiled on first use; sources ship under flex_gemm/kernels/cuda/.
+[tool.hatch.build.targets.wheel]
+packages = ["flex_gemm"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/flex_gemm",
+    "/tests",
+    "/docs",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+    "/CLAUDE.md",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Hatchling only ships *.py from packages by default; include JIT CUDA / Triton-adjacent sources explicitly.
+"flex_gemm/kernels/cuda/ext.cpp" = "flex_gemm/kernels/cuda/ext.cpp"
+"flex_gemm/kernels/cuda/hash/hash.cu" = "flex_gemm/kernels/cuda/hash/hash.cu"
+"flex_gemm/kernels/cuda/hash/api.h" = "flex_gemm/kernels/cuda/hash/api.h"
+"flex_gemm/kernels/cuda/hash/hash.cuh" = "flex_gemm/kernels/cuda/hash/hash.cuh"
+"flex_gemm/kernels/cuda/spconv/morton.cu" = "flex_gemm/kernels/cuda/spconv/morton.cu"
+"flex_gemm/kernels/cuda/spconv/morton.h" = "flex_gemm/kernels/cuda/spconv/morton.h"
+"flex_gemm/kernels/cuda/spconv/neighbor_map.cu" = "flex_gemm/kernels/cuda/spconv/neighbor_map.cu"
+"flex_gemm/kernels/cuda/spconv/api.h" = "flex_gemm/kernels/cuda/spconv/api.h"
+"flex_gemm/kernels/cuda/spconv/neighbor_map.h" = "flex_gemm/kernels/cuda/spconv/neighbor_map.h"

@@ -1,4 +1,3 @@
-from typing import *
 import math
 import torch
 import triton
@@ -166,7 +165,7 @@ def sparse_submanifold_conv_bwd_implicit_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor,
     neighbor: torch.Tensor,
-) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     assert grad_output.is_contiguous(), "Matrix grad_output must be contiguous"
     assert input.shape[1] == weight.shape[2], "Incompatible dimensions"
     assert input.is_contiguous(), "Matrix input must be contiguous"

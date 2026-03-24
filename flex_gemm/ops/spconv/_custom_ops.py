@@ -6,7 +6,7 @@ tensors (for every possible autotune block-size) instead of Python
 callbacks, making them compatible with ``torch.compile``.
 """
 
-from typing import List, Optional, Sequence, Tuple
+from collections.abc import Sequence
 
 import torch
 from torch import Tensor
@@ -90,7 +90,7 @@ def sparse_conv_masked_bwd(
     valid_signal_i: Tensor,
     valid_signal_o: Tensor,
     valid_signal_seg: Tensor,
-) -> Tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor]:
     """Masked implicit-GEMM backward (non-split-K).
 
     Always computes all three gradients (input, weight, bias).
@@ -217,7 +217,7 @@ def sparse_conv_masked_splitk_bwd(
     valid_signal_o: Tensor,
     valid_signal_seg: Tensor,
     splitk: int,
-) -> Tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, Tensor]:
     """Masked implicit-GEMM split-K backward.
 
     Always computes all three gradients (input, weight, bias).

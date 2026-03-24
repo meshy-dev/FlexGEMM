@@ -31,8 +31,15 @@ It implements **Explicit**, **Implicit**, and **Masked Implicit** algorithm vari
 ```bash
 git clone https://github.com/JeffreyXiang/FlexGEMM.git
 cd FlexGEMM
-pip install . --no-build-isolation
+pip install .
 ```
+
+The wheel is **pure Python** (`py3-none-any`): CUDA sources ship under `flex_gemm/kernels/cuda/`
+and the pybind extension is **JIT-built** on first use of a native op (see
+`flex_gemm/kernels/_cuda_jit.py`). The build backend is **Hatchling**; **PyTorch is not**
+required at build time (only at runtime).
+
+Editable install: `pip install -e .`
 
 ## 💻 Usage Example
 

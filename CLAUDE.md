@@ -20,11 +20,24 @@ cd workspace/meshylatv_sparse_sdf_dev
 # then use pixi run/shell from there
 ```
 
-## First Import: JIT Compilation
+## Native CUDA extension (JIT)
 
-The first `import flex_gemm` triggers JIT CUDA extension compilation via `torch.utils.cpp_extension`. This can take **several minutes**. Subsequent imports use the cache at `~/.cache/torch_extensions/`.
+The pybind CUDA extension is **not** built at `pip install` time. It is JIT-compiled
+with `torch.utils.cpp_extension.load` on **first use** of any native binding
+(hashmap ops, hashmap neighbor map, masked post-process).
 
-If you change CUDA source files and need to force recompilation:
+- **Import-only** (`import flex_gemm`) does **not** compile.
+- **`SPATIAL_INDEX_MODE=searchsorted`** with **explicit/implicit** algorithms never
+  touches those bindings for neighbor-map build, so many workflows **never** compile
+  native code (masked + CUDA still runs post-process and will JIT on first use).
+
+Environment:
+
+- `FLEX_GEMM_VERBOSE_JIT=1` — verbose JIT build
+- `FLEX_GEMM_DISABLE_CUDA_JIT=1` — refuse to compile (ops that need CUDA will fail)
+
+Force recompilation after editing sources:
+
 ```bash
 rm -rf ~/.cache/torch_extensions/
 ```
@@ -33,8 +46,15 @@ rm -rf ~/.cache/torch_extensions/
 
 ```python
 import flex_gemm
-from flex_gemm.ops.spconv import sparse_submanifold_conv3d, SpConvConfig, Algorithm, set_algorithm
-from flex_gemm.ops.grid_sample import grid_sample_3d
+from flex_gemm.ops.spconv import (
+    sparse_submanifold_conv3d,
+    SpConvConfig,
+    Algorithm,
+    set_algorithm,
+    set_spatial_index_mode,
+)
+# Neighbor map: default "hashmap" (CUDA). Use set_spatial_index_mode("searchsorted")
+# for Morton keys (meshy_sparse.morton3d_16-compatible) + searchsorted; optional set_searchsorted_skip_k.
 ```
 
 Two calling conventions for sparse conv:
@@ -53,9 +73,8 @@ out = sparse_submanifold_conv3d(feats, weight=weight, bias=bias, config=config)
 | Category | `torch.ops.flex_gemm.*` ops |
 |---|---|
 | Hashmap | `hashmap_insert_cuda`, `hashmap_lookup_cuda`, `hashmap_insert_3d_cuda`, `hashmap_lookup_3d_cuda`, `hashmap_insert_3d_idx_as_val_cuda` |
-| Serialize | `z_order_encode`, `z_order_decode`, `hilbert_encode`, `hilbert_decode` |
-| Grid sample | `hashmap_build_grid_sample_3d_nearest_neighbor_map`, `hashmap_build_grid_sample_3d_trilinear_neighbor_map_weight` |
 | Spconv neighbor map | `hashmap_build_submanifold_conv_neighbour_map_cuda`, `neighbor_map_post_process_for_masked_implicit_gemm_1`, `neighbor_map_post_process_for_masked_implicit_gemm_2` |
+| Morton (JIT pybind only, not `torch.ops`) | `morton_keys_3d_16_cuda`, `morton_keys_batched_ncwhd_cuda` on `flex_gemm.kernels.cuda` |
 | Spconv kernels | `sparse_conv_masked_fwd`, `sparse_conv_masked_bwd`, `sparse_conv_masked_splitk_fwd`, `sparse_conv_masked_splitk_bwd` |
 
 ## Running Tests
@@ -74,9 +93,7 @@ pixi run -e default python ../../packages/meshy_sparse/third_party/FlexGEMM/test
 
 # Individual test files
 pixi run -e default python ../../packages/meshy_sparse/third_party/FlexGEMM/tests/custom_ops/test_spconv.py
-pixi run -e default python ../../packages/meshy_sparse/third_party/FlexGEMM/tests/custom_ops/test_grid_sample.py
 pixi run -e default python ../../packages/meshy_sparse/third_party/FlexGEMM/tests/custom_ops/test_hashmap.py
-pixi run -e default python ../../packages/meshy_sparse/third_party/FlexGEMM/tests/custom_ops/test_serialize.py
 pixi run -e default python ../../packages/meshy_sparse/third_party/FlexGEMM/tests/custom_ops/test_neighbor_cache.py
 ```
 

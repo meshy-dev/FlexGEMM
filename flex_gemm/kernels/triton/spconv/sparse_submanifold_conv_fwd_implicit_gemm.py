@@ -1,4 +1,3 @@
-from typing import *
 import math
 import torch
 import triton

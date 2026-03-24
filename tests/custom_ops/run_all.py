@@ -23,8 +23,7 @@ _RESET = "\033[0m"
 TEST_DIR = Path(__file__).resolve().parent
 TEST_FILES = [
     "test_hashmap.py",
-    "test_serialize.py",
-    "test_grid_sample.py",
+    "test_morton_keys.py",
     "test_neighbor_cache.py",
     "test_spconv.py",
 ]

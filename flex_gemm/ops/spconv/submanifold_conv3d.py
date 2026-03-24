@@ -1,9 +1,9 @@
-from typing import *
 import dataclasses
 import torch
 from torch import Tensor
 from torch.autograd import Function
 from . import Algorithm
+from .neighbor_map_searchsorted import build_submanifold_neighbor_map_searchsorted
 from .. import spconv, utils
 from ... import kernels
 
@@ -23,9 +23,9 @@ class SpConvConfig:
 
     neighbor_map: Tensor                   # [N, V] uint32
     sorted_idx: Tensor                     # [N] int64
-    valid_kernels: List[Tensor]            # len = len(block_sizes), per-B1 valid kernel indices
-    valid_kernel_segs: List[Tensor]        # len = len(block_sizes), per-B1 valid kernel segments
-    block_sizes: List[int]                 # e.g. [32, 64, 128, 256]
+    valid_kernels: list[Tensor]            # len = len(block_sizes), per-B1 valid kernel indices
+    valid_kernel_segs: list[Tensor]        # len = len(block_sizes), per-B1 valid kernel segments
+    block_sizes: list[int]                 # e.g. [32, 64, 128, 256]
     valid_signal_i: Tensor                 # [M] uint32
     valid_signal_o: Tensor                 # [M] uint32
     valid_signal_seg: Tensor               # [V+1] uint32
@@ -80,8 +80,8 @@ class SubMConv3dNeighborCache:
         assert hasattr(self, 'sorted_idx'), "sorted_idx is required (masked algorithm)"
 
         block_sizes = _ALL_BLOCK_SIZES
-        valid_kernels: List[Tensor] = []
-        valid_kernel_segs: List[Tensor] = []
+        valid_kernels: list[Tensor] = []
+        valid_kernel_segs: list[Tensor] = []
         for bs in block_sizes:
             self.compute_kernel_idx(bs)
             valid_kernels.append(self[f'valid_kernel_{bs}'])
@@ -106,100 +106,161 @@ class SubMConv3dFunction(Function):
     def _compute_neighbor_cache(
         coords: torch.Tensor,
         shape: torch.Size,
-        kernel_size: Tuple[int, int, int],
-        dilation: Tuple[int, int, int]
+        kernel_size: tuple[int, int, int],
+        dilation: tuple[int, int, int],
     ) -> SubMConv3dNeighborCache:
         assert coords.is_contiguous(), "Coords should be contiguous"
         assert coords.dtype in [torch.int32], "Unsupported coords dtype. Expect int32"
         N, C, W, H, D = shape
-        
-        hashmap_keys, hashmap_vals = utils.init_hashmap(shape, int(spconv.HASHMAP_RATIO * coords.shape[0]), coords.device)
 
-        if spconv.ALGORITHM in [Algorithm.EXPLICIT_GEMM, Algorithm.IMPLICIT_GEMM, Algorithm.IMPLICIT_GEMM_SPLITK]:
-            if coords.is_cuda:
-                neighbor_map = torch.ops.flex_gemm.hashmap_build_submanifold_conv_neighbour_map_cuda(
-                    hashmap_keys, hashmap_vals, coords,
-                    W, H, D,
-                    kernel_size[0], kernel_size[1], kernel_size[2],
-                    dilation[0], dilation[1], dilation[2],
+        if spconv.SPATIAL_INDEX_MODE == "searchsorted":
+            neighbor_map = build_submanifold_neighbor_map_searchsorted(
+                coords,
+                shape,
+                kernel_size,
+                dilation,
+                skip_k=spconv.SEARCHSORTED_SKIP_K,
+            )
+            if spconv.ALGORITHM in [
+                Algorithm.EXPLICIT_GEMM,
+                Algorithm.IMPLICIT_GEMM,
+                Algorithm.IMPLICIT_GEMM_SPLITK,
+            ]:
+                return SubMConv3dNeighborCache(**{"neighbor_map": neighbor_map})
+
+            if spconv.ALGORITHM in [
+                Algorithm.MASKED_IMPLICIT_GEMM,
+                Algorithm.MASKED_IMPLICIT_GEMM_SPLITK,
+            ]:
+                if not neighbor_map.is_cuda:
+                    raise NotImplementedError(
+                        "masked implicit GEMM neighbor post-process is CUDA-only; "
+                        "use CUDA coords, explicit/implicit algorithms on CPU, or hashmap mode."
+                    )
+                V = kernel_size[0] * kernel_size[1] * kernel_size[2]
+                assert V <= 32, (
+                    "Currently, the max kernel volume is 32 because kernel mask is encoded as uint32"
                 )
-            else:
-                raise NotImplementedError("CPU version of hashmap is not implemented")
-            return SubMConv3dNeighborCache(**{
-                'neighbor_map': neighbor_map,
-            })
-        
-        elif spconv.ALGORITHM in [Algorithm.MASKED_IMPLICIT_GEMM, Algorithm.MASKED_IMPLICIT_GEMM_SPLITK]:
-            if coords.is_cuda:
-                neighbor_map = torch.ops.flex_gemm.hashmap_build_submanifold_conv_neighbour_map_cuda(
-                    hashmap_keys, hashmap_vals, coords,
-                    W, H, D,
-                    kernel_size[0], kernel_size[1], kernel_size[2],
-                    dilation[0], dilation[1], dilation[2],
+                (
+                    gray_code,
+                    sorted_idx,
+                    valid_signal_i,
+                    valid_signal_o,
+                    valid_signal_seg,
+                ) = torch.ops.flex_gemm.neighbor_map_post_process_for_masked_implicit_gemm_1(
+                    neighbor_map
                 )
-            else:
-                raise NotImplementedError("CPU version of hashmap is not implemented")
-            V = kernel_size[0] * kernel_size[1] * kernel_size[2]
-            assert V <= 32, "Currently, the max kernel volume is 32 because kernel mask is encoded as uint32"
-            
-            gray_code, sorted_idx, valid_signal_i, valid_signal_o, valid_signal_seg = \
-                torch.ops.flex_gemm.neighbor_map_post_process_for_masked_implicit_gemm_1(neighbor_map)
-            
-            return SubMConv3dNeighborCache(**{
-                'neighbor_map': neighbor_map,
-                'gray_code': gray_code,
-                'sorted_idx': sorted_idx,
-                'valid_signal_seg': valid_signal_seg,
-                'valid_signal_i': valid_signal_i,
-                'valid_signal_o': valid_signal_o,
-            })
-                
-        else:
+                return SubMConv3dNeighborCache(
+                    **{
+                        "neighbor_map": neighbor_map,
+                        "gray_code": gray_code,
+                        "sorted_idx": sorted_idx,
+                        "valid_signal_seg": valid_signal_seg,
+                        "valid_signal_i": valid_signal_i,
+                        "valid_signal_o": valid_signal_o,
+                    }
+                )
+
             raise ValueError(f"Unsupported algorithm {spconv.ALGORITHM}")
 
+        if not coords.is_cuda:
+            raise NotImplementedError(
+                "CUDA coords are required for hashmap neighbor-map build; "
+                "use spconv.set_spatial_index_mode('searchsorted') for CPU or JIT-friendly builds."
+            )
+
+        hashmap_keys, hashmap_vals = utils.init_hashmap(
+            shape, int(spconv.HASHMAP_RATIO * coords.shape[0]), coords.device
+        )
+
+        if spconv.ALGORITHM in [
+            Algorithm.EXPLICIT_GEMM,
+            Algorithm.IMPLICIT_GEMM,
+            Algorithm.IMPLICIT_GEMM_SPLITK,
+        ]:
+            neighbor_map = torch.ops.flex_gemm.hashmap_build_submanifold_conv_neighbour_map_cuda(
+                hashmap_keys,
+                hashmap_vals,
+                coords,
+                W,
+                H,
+                D,
+                kernel_size[0],
+                kernel_size[1],
+                kernel_size[2],
+                dilation[0],
+                dilation[1],
+                dilation[2],
+            )
+            return SubMConv3dNeighborCache(**{"neighbor_map": neighbor_map})
+
+        if spconv.ALGORITHM in [
+            Algorithm.MASKED_IMPLICIT_GEMM,
+            Algorithm.MASKED_IMPLICIT_GEMM_SPLITK,
+        ]:
+            neighbor_map = torch.ops.flex_gemm.hashmap_build_submanifold_conv_neighbour_map_cuda(
+                hashmap_keys,
+                hashmap_vals,
+                coords,
+                W,
+                H,
+                D,
+                kernel_size[0],
+                kernel_size[1],
+                kernel_size[2],
+                dilation[0],
+                dilation[1],
+                dilation[2],
+            )
+            V = kernel_size[0] * kernel_size[1] * kernel_size[2]
+            assert V <= 32, (
+                "Currently, the max kernel volume is 32 because kernel mask is encoded as uint32"
+            )
+
+            gray_code, sorted_idx, valid_signal_i, valid_signal_o, valid_signal_seg = (
+                torch.ops.flex_gemm.neighbor_map_post_process_for_masked_implicit_gemm_1(
+                    neighbor_map
+                )
+            )
+
+            return SubMConv3dNeighborCache(
+                **{
+                    "neighbor_map": neighbor_map,
+                    "gray_code": gray_code,
+                    "sorted_idx": sorted_idx,
+                    "valid_signal_seg": valid_signal_seg,
+                    "valid_signal_i": valid_signal_i,
+                    "valid_signal_o": valid_signal_o,
+                }
+            )
+
+        raise ValueError(f"Unsupported algorithm {spconv.ALGORITHM}")
+
+    @staticmethod
     def _compute_neighbor_cache_torch(
         coords: torch.Tensor,
         shape: torch.Size,
-        kernel_size: Tuple[int, int, int],
-        dilation: Tuple[int, int, int]
+        kernel_size: tuple[int, int, int],
+        dilation: tuple[int, int, int],
     ) -> SubMConv3dNeighborCache:
-        assert spconv.ALGORITHM == Algorithm.EXPLICIT_GEMM, "Only explicit_gemm is supported for torch implementation"
-        N, C, W, H, D = shape
-        L = coords.shape[0]
-        assert N * W * H * D <= 2**32, "Currently, the max number of elements in a tensor is 2^32"
-        M = torch.tensor([W * H * D, H * D, D, 1], device=coords.device).int()
-        
-        keys = (coords * M[None]).sum(dim=-1)
-        sorted_keys, indices = torch.sort(keys)
-        
-        # Compute neighbor coords
-        offset = torch.meshgrid(
-            torch.arange(-(kernel_size[0] // 2) * dilation[0], kernel_size[0] // 2 * dilation[0] + 1, dilation[0]),
-            torch.arange(-(kernel_size[1] // 2) * dilation[1], kernel_size[1] // 2 * dilation[1] + 1, dilation[1]),
-            torch.arange(-(kernel_size[2] // 2) * dilation[2], kernel_size[2] // 2 * dilation[2] + 1, dilation[2]),
-            indexing='ij'
+        assert spconv.ALGORITHM == Algorithm.EXPLICIT_GEMM, (
+            "Only explicit_gemm is supported for torch implementation"
         )
-        offset = torch.stack(offset, dim=-1).reshape(-1, 3).int().to(coords.device)
-        neighbor_coords = coords.unsqueeze(1).repeat(1, kernel_size[0] * kernel_size[1] * kernel_size[2], 1)
-        neighbor_coords[:, :, -3:] += offset.unsqueeze(0)                                    # [N, kernel_vol, 4]
-        neighbor_coords = neighbor_coords.reshape(-1, 4)                                    # [N * kernel_vol, 4]
-        neighbor_valid = (neighbor_coords[:, 1] >= 0) & (neighbor_coords[:, 1] < W) & \
-                         (neighbor_coords[:, 2] >= 0) & (neighbor_coords[:, 2] < H) & \
-                         (neighbor_coords[:, 3] >= 0) & (neighbor_coords[:, 3] < D)
-        neighbor_keys = (neighbor_coords * M[None]).sum(dim=-1)
-        neighbor_search_indices = torch.searchsorted(sorted_keys, neighbor_keys)
-        neighbor_search_indices = torch.clamp(neighbor_search_indices, 0, sorted_keys.shape[0] - 1)
-        neighbor_valid &= sorted_keys[neighbor_search_indices] == neighbor_keys
-        neighbor_indices = torch.full((L * kernel_size[0] * kernel_size[1] * kernel_size[2],), 0xffffffff, dtype=torch.long, device=coords.device)
-        neighbor_indices[neighbor_valid] = indices[neighbor_search_indices[neighbor_valid]]
-        return SubMConv3dNeighborCache(**{'neighbor_map': neighbor_indices.reshape(L, -1).to(torch.uint32)})
-        
+        neighbor_map = build_submanifold_neighbor_map_searchsorted(
+            coords,
+            shape,
+            kernel_size,
+            dilation,
+            skip_k=spconv.SEARCHSORTED_SKIP_K,
+        )
+        return SubMConv3dNeighborCache(**{"neighbor_map": neighbor_map})
+
     @staticmethod
     def _sparse_submanifold_conv_forward(
         feats: torch.Tensor,
         neighbor_cache: SubMConv3dNeighborCache,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert feats.is_contiguous(), "Input features should be contiguous"
         N = feats.shape[0]
@@ -271,8 +332,8 @@ class SubMConv3dFunction(Function):
         feats: torch.Tensor,
         neighbor_cache: SubMConv3dNeighborCache,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         N = feats.shape[0]
         Co, Kw, Kh, Kd, Ci = weight.shape
         V = Kd * Kh * Kw
@@ -373,11 +434,11 @@ class SubMConv3dFunction(Function):
         feats: torch.Tensor,
         coords: torch.Tensor,
         shape: torch.Size,
-        neighbor_cache: Optional[SubMConv3dNeighborCache],
+        neighbor_cache: SubMConv3dNeighborCache | None,
         weight: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        dilation: Tuple[int, int, int] = (1, 1, 1),
-    ) -> Tuple[torch.Tensor, SubMConv3dNeighborCache]:
+        bias: torch.Tensor | None = None,
+        dilation: tuple[int, int, int] = (1, 1, 1),
+    ) -> tuple[torch.Tensor, SubMConv3dNeighborCache]:
         Co, Kw, Kh, Kd, Ci = weight.shape
         assert feats.shape[-1] == Ci, f"Input channels ({feats.shape[-1]}) should match weight channels ({Ci})"
         
@@ -423,12 +484,12 @@ class SubMConv3dCompiledFunction(Function):
         ctx,
         feats: Tensor,
         weight: Tensor,
-        bias: Optional[Tensor],
+        bias: Tensor | None,
         neighbor_map: Tensor,
         sorted_idx: Tensor,
-        valid_kernels: List[Tensor],
-        valid_kernel_segs: List[Tensor],
-        block_sizes: List[int],
+        valid_kernels: list[Tensor],
+        valid_kernel_segs: list[Tensor],
+        block_sizes: list[int],
         valid_signal_i: Tensor,
         valid_signal_o: Tensor,
         valid_signal_seg: Tensor,
@@ -515,12 +576,12 @@ def sparse_submanifold_conv3d(
     coords: torch.Tensor = None,
     shape: torch.Size = None,
     weight: torch.Tensor = None,
-    bias: Optional[torch.Tensor] = None,
-    neighbor_cache: Optional[SubMConv3dNeighborCache] = None,
-    dilation: Tuple[int, int, int] = (1, 1, 1),
+    bias: torch.Tensor | None = None,
+    neighbor_cache: SubMConv3dNeighborCache | None = None,
+    dilation: tuple[int, int, int] = (1, 1, 1),
     *,
-    config: Optional[SpConvConfig] = None,
-) -> Union[Tuple[torch.Tensor, SubMConv3dNeighborCache], torch.Tensor]:
+    config: SpConvConfig | None = None,
+) -> tuple[torch.Tensor, SubMConv3dNeighborCache] | torch.Tensor:
     """
     Sparse submanifold convolution for 3D input.
 
@@ -537,7 +598,7 @@ def sparse_submanifold_conv3d(
         coords (torch.Tensor): [N, 4] tensor of input coordinates (legacy only).
         shape (torch.Size): shape of the input tensor in NCWHD order (legacy only).
         weight (torch.Tensor): [Co, Kw, Kh, Kd, Ci] tensor of weights.
-        bias (Optional[torch.Tensor]): [Co] tensor of biases.
+        bias (torch.Tensor | None): [Co] tensor of biases.
         neighbor_cache: neighbor cache for forward (legacy only).
         dilation: dilation rate (legacy only).
         config: frozen :class:`SpConvConfig` for the compiled path.

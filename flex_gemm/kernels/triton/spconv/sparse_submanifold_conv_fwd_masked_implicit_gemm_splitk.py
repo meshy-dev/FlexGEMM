@@ -1,5 +1,6 @@
-from typing import *
 import math
+from collections.abc import Callable
+
 import torch
 import triton
 import triton.language as tl

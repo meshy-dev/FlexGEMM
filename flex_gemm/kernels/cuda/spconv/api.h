@@ -10,4 +10,5 @@
  */
 
 #pragma once
+#include "morton.h"
 #include "neighbor_map.h"

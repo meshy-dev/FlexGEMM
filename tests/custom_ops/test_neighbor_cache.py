@@ -296,6 +296,90 @@ def test_post_process_compile() -> bool:
     )
 
 
+def test_morton_key_matches_meshy_sparse_when_available() -> bool:
+    """FlexGEMM Morton keys match meshy_sparse.morton3d_16 when that package is importable."""
+    print("\n" + "-" * 64)
+    print("  morton_key vs meshy_sparse.morton3d_16 (optional)")
+    print("-" * 64)
+    try:
+        import meshy_sparse  # noqa: F401
+    except ImportError:
+        print(f"  skip (meshy_sparse not installed)  {PASS}")
+        return True
+
+    if not torch.cuda.is_available():
+        print(f"  skip (no CUDA)  {PASS}")
+        return True
+
+    from flex_gemm.ops.spconv.morton_key import morton_keys_batched_ncwhd
+
+    g = torch.Generator(device="cuda")
+    g.manual_seed(0)
+    coords = torch.randint(
+        0, 64, (512, 4), dtype=torch.int32, device="cuda", generator=g
+    )
+    a = morton_keys_batched_ncwhd(coords, skip_k=0)
+    b = torch.ops.meshy_sparse.morton3d_16(coords, 0)
+    ok = torch.equal(a, b)
+    if ok:
+        print(f"  morton parity  {PASS}")
+    else:
+        print(f"  morton parity  {FAIL}")
+        print(f"  max |a-b| = {(a - b).abs().max().item()}")
+    return ok
+
+
+def test_searchsorted_matches_hashmap() -> bool:
+    """Sorted-key + searchsorted neighbor map matches CUDA hashmap (GPU only)."""
+    print("\n" + "-" * 64)
+    print("  searchsorted vs hashmap neighbor_map parity")
+    print("-" * 64)
+
+    if not torch.cuda.is_available():
+        print(f"  skip (no CUDA)  {PASS}")
+        return True
+
+    from flex_gemm.ops import spconv
+    from flex_gemm.ops import utils
+    from flex_gemm.ops.spconv.neighbor_map_searchsorted import (
+        build_submanifold_neighbor_map_searchsorted,
+    )
+
+    _feats, coords, shape = sphere_coords(RES, CH)
+    N = coords.shape[0]
+    ksize = (3, 3, 3)
+    dilation = (1, 1, 1)
+    W, H, D = shape[2], shape[3], shape[4]
+
+    hashmap_keys, hashmap_vals = utils.init_hashmap(
+        shape, int(spconv.HASHMAP_RATIO * N), coords.device
+    )
+    nm_hash = torch.ops.flex_gemm.hashmap_build_submanifold_conv_neighbour_map_cuda(
+        hashmap_keys,
+        hashmap_vals,
+        coords,
+        W,
+        H,
+        D,
+        ksize[0],
+        ksize[1],
+        ksize[2],
+        dilation[0],
+        dilation[1],
+        dilation[2],
+    )
+    nm_ss = build_submanifold_neighbor_map_searchsorted(
+        coords, shape, ksize, dilation
+    )
+    ok = torch.equal(nm_hash, nm_ss)
+    if ok:
+        print(f"  parity  {PASS}")
+    else:
+        print(f"  parity  {FAIL}")
+        print(f"  mismatched entries: {(nm_hash != nm_ss).sum().item()}")
+    return ok
+
+
 # ===================================================================
 # Main
 # ===================================================================
@@ -312,6 +396,8 @@ def main() -> int:
     results["post_process_2"] = test_post_process_2()
     results["freeze_config"] = test_freeze_spconv_config()
     results["post_process_compile"] = test_post_process_compile()
+    results["searchsorted_hashmap_parity"] = test_searchsorted_matches_hashmap()
+    results["morton_vs_meshy_sparse"] = test_morton_key_matches_meshy_sparse_when_available()
 
     return print_summary(results)
 
