@@ -46,7 +46,7 @@ def _build_compile_flags() -> tuple[list[str], list[str], bool]:
     if platform.system() == "Windows":
         extra_cxx = [
             "/O2",
-            "/std:c++17",
+            "/std:c++20",
             "/EHsc",
             "/openmp",
             "/permissive-",
@@ -55,8 +55,8 @@ def _build_compile_flags() -> tuple[list[str], list[str], bool]:
         extra_cuda = (
             [
                 "-O3",
-                "-std=c++17",
-                "-Xcompiler=/std:c++17",
+                "-std=c++20",
+                "-Xcompiler=/std:c++20",
                 "-Xcompiler=/EHsc",
                 "-Xcompiler=/permissive-",
                 "-Xcompiler=/Zc:__cplusplus",
@@ -67,11 +67,11 @@ def _build_compile_flags() -> tuple[list[str], list[str], bool]:
         cxx11_abi = "1" if torch.compiled_with_cxx11_abi() else "0"
         extra_cxx = [
             "-O3",
-            "-std=c++17",
+            "-std=c++20",
             "-fopenmp",
             f"-D_GLIBCXX_USE_CXX11_ABI={cxx11_abi}",
         ]
-        extra_cuda = ["-O3", "-std=c++17"] + cc_flag
+        extra_cuda = ["-O3", "-std=c++20"] + cc_flag
 
     return extra_cxx, extra_cuda, is_hip
 

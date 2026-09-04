@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flex_gemm"
-version = "1.1.0"
+version = "1.1.1"
 description = "A Cross-Platform Backend for High-Performance Sparse Convolutions"
 requires-python = ">=3.11"
 readme = "README.md"
